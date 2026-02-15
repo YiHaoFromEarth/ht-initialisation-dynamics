@@ -1,0 +1,62 @@
+{
+    "model": "ResearchCNN",
+    "model_params": {
+        "kwargs": {
+            "input_channels": 1,
+            "base_channels": 32,
+            "num_classes": 964,
+            "depth": 3,
+            "activation_name": "tanh",
+            "dropout_p": 0.5,
+            "bias": false
+        }
+    },
+    "optimizer": "SGD",
+    "optimizer_params": {
+        "lr": 0.01,
+        "momentum": 0.0,
+        "weight_decay": 0.0
+    },
+    "hyperparams": {
+        "epochs": 150,
+        "seed": 0,
+        "log_freq": 10,
+        "device": "cuda"
+    },
+    "data_config": {
+        "dataset_name": "Omniglot",
+        "batch_size": 128,
+        "use_gpu": true,
+        "fast_load": true,
+        "transforms": [
+            {
+                "Resize": {
+                    "size": [
+                        28,
+                        28
+                    ]
+                }
+            },
+            {
+                "Grayscale": {
+                    "num_output_channels": 1
+                }
+            },
+            {
+                "ToTensor": null
+            },
+            {
+                "Normalize": {
+                    "mean": [
+                        0.5
+                    ],
+                    "std": [
+                        0.5
+                    ]
+                }
+            }
+        ],
+        "transform": "Compose(\n    Resize(size=[28, 28], interpolation=bilinear, max_size=None, antialias=True)\n    Grayscale(num_output_channels=1)\n    ToTensor()\n    Normalize(mean=[0.5], std=[0.5])\n)"
+    },
+    "seed": 3
+}
