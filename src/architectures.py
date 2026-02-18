@@ -47,49 +47,6 @@ class GeneralMLP(nn.Module):
         x = x.view(x.size(0), -1)
         return self.features(x)
 
-class ResearchMLP(GeneralMLP):
-    def __init__(self, *args, **kwargs):
-        # Initialize parent to build standard layer stack
-        super(ResearchMLP, self).__init__(*args, **kwargs)
-
-    def get_features(self, x):
-        """
-        Extracts MLP features, halting BEFORE the final activation layer.
-        Preserves raw directional spikes for Cosine similarity evaluation.
-        """
-        # 1. Flatten the input (e.g., 28x28 -> 784)
-        x = x.view(x.size(0), -1)
-
-        # 2. Identify all components in the feature extractor
-        layers = list(self.features.children())
-
-        # 3. Locate the index of the very last activation (Tanh/ReLU/Sigmoid)
-        last_act_idx = -1
-        for i in range(len(layers) - 1, -1, -1):
-            if isinstance(layers[i], (nn.Tanh, nn.ReLU, nn.Sigmoid)):
-                last_act_idx = i
-                break
-
-        # 4. Execute the pass up to, but not including, that final activation
-        # This ensures the output is the raw linear projection of the final hidden layer
-        if last_act_idx != -1:
-            for i in range(last_act_idx):
-                x = layers[i](x)
-        else:
-            # Fallback if no activation is found
-            x = self.features(x)
-
-        return x
-
-    def forward(self, x):
-        """
-        Standard training pass using the full parent logic.
-        Maintains activations for gradient stability during backprop.
-        """
-        x = x.view(x.size(0), -1)
-        x = self.features(x)
-        return self.classifier(x)
-
 class GeneralCNN(nn.Module):
     def __init__(self, input_channels, base_channels, num_classes, depth,
                  activation_name='tanh', dropout_p=0.5, bias=False):

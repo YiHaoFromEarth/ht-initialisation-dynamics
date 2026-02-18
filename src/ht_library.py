@@ -165,7 +165,6 @@ def train_model_ht(model_input, ht_config, model_params, optim_class, optim_para
     if not hook_path:
         # Default: Target the very last index of the Sequential 'features' block
         last_idx = len(list(model.features.children())) - 1
-        print(list(model.features.children()))
         hook_path = f"features.{last_idx}"
 
     feature_hook = HookManager()
