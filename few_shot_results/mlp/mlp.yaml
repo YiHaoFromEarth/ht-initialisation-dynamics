@@ -1,6 +1,11 @@
 experiment_metadata:
   name: "MLP_REPLICATION_TEST"
-  output_root: "./few_shot_results/cnn"
+  output_root: "./few_shot_results/mlp"
+  comment: >
+    The aim is to replicate the MLP few-shot results from the legacy code
+    Used tanh instead of ReLu, no bias, momentum or weight decay
+    Randomised seed for each heavy-tail initialisation to ensure no super-paths
+    Matched all other params to the original code as closely as possible
 
 model:
   class_name: "GeneralMLP"

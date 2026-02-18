@@ -1,0 +1,38 @@
+Logging initialized in: few_shot_results/mlp/Gaussian_Baseline/GeneralMLP_LR0.05_BS128_20260218_141958_s3
+Overwriting weights with Heavy-Tailed Distribution (α=2.0, g=1.0)
+Applying HT Init: alpha=2.0, g=1.0, seed=3
+Research Probe successfully attached to: features.3
+
+============================================================
+RESEARCH PROBE: ARCHITECTURAL BINDING CONFIRMATION
+============================================================
+[features.0...............]: Linear         
+[features.1...............]: Tanh           
+[features.2...............]: Linear         
+[features.3...............]: Tanh            <--- [PROBE ATTACHED HERE]
+[classifier...............]: Linear         
+============================================================
+
+Epoch 1 | Train Acc: 0.0028 | Test Acc: 0.0017 | FS 1-Shot: 0.4892
+Epoch 10 | Train Acc: 0.3679 | Test Acc: 0.0017 | FS 1-Shot: 0.7036
+Epoch 20 | Train Acc: 0.5355 | Test Acc: 0.0021 | FS 1-Shot: 0.7052
+Epoch 30 | Train Acc: 0.6345 | Test Acc: 0.0022 | FS 1-Shot: 0.7072
+Epoch 40 | Train Acc: 0.7223 | Test Acc: 0.0027 | FS 1-Shot: 0.7252
+Epoch 50 | Train Acc: 0.7998 | Test Acc: 0.0023 | FS 1-Shot: 0.7320
+Epoch 60 | Train Acc: 0.8632 | Test Acc: 0.0022 | FS 1-Shot: 0.7056
+Epoch 70 | Train Acc: 0.9113 | Test Acc: 0.0021 | FS 1-Shot: 0.7160
+Epoch 80 | Train Acc: 0.9435 | Test Acc: 0.0022 | FS 1-Shot: 0.7100
+Epoch 90 | Train Acc: 0.9663 | Test Acc: 0.0026 | FS 1-Shot: 0.7292
+Epoch 100 | Train Acc: 0.9791 | Test Acc: 0.0024 | FS 1-Shot: 0.7164
+Epoch 110 | Train Acc: 0.9859 | Test Acc: 0.0026 | FS 1-Shot: 0.7140
+Epoch 120 | Train Acc: 0.9898 | Test Acc: 0.0021 | FS 1-Shot: 0.7504
+Epoch 130 | Train Acc: 0.9919 | Test Acc: 0.0023 | FS 1-Shot: 0.7348
+Epoch 140 | Train Acc: 0.9938 | Test Acc: 0.0025 | FS 1-Shot: 0.7476
+Epoch 150 | Train Acc: 0.9949 | Test Acc: 0.0021 | FS 1-Shot: 0.7216
+
+========================================
+BACKBONE EXTRACTION VERIFICATION
+Max Absolute Feature Value: 1.0000
+========================================
+
+--- Running Final Few-Shot Sweep ---

@@ -1,0 +1,42 @@
+Logging initialized in: few_shot_results/cnn/Gaussian_Baseline/ResearchCNN_LR0.01_BS128_20260218_143558_s4
+Overwriting weights with Heavy-Tailed Distribution (α=2.0, g=0.5)
+Applying HT Init: alpha=2.0, g=0.5, seed=4
+Research Probe successfully attached to: features.7
+
+============================================================
+RESEARCH PROBE: ARCHITECTURAL BINDING CONFIRMATION
+============================================================
+[features.0...............]: Conv2d         
+[features.1...............]: Tanh           
+[features.2...............]: MaxPool2d      
+[features.3...............]: Conv2d         
+[features.4...............]: Tanh           
+[features.5...............]: MaxPool2d      
+[features.6...............]: Conv2d         
+[features.7...............]: Tanh            <--- [PROBE ATTACHED HERE]
+[classifier...............]: Linear         
+============================================================
+
+Epoch 1 | Train Acc: 0.0013 | Test Acc: 0.0014 | FS 1-Shot: 0.6280
+Epoch 10 | Train Acc: 0.0511 | Test Acc: 0.0017 | FS 1-Shot: 0.5672
+Epoch 20 | Train Acc: 0.2979 | Test Acc: 0.0019 | FS 1-Shot: 0.6264
+Epoch 30 | Train Acc: 0.4358 | Test Acc: 0.0017 | FS 1-Shot: 0.5996
+Epoch 40 | Train Acc: 0.5229 | Test Acc: 0.0017 | FS 1-Shot: 0.6316
+Epoch 50 | Train Acc: 0.6029 | Test Acc: 0.0023 | FS 1-Shot: 0.6364
+Epoch 60 | Train Acc: 0.6657 | Test Acc: 0.0023 | FS 1-Shot: 0.6444
+Epoch 70 | Train Acc: 0.7197 | Test Acc: 0.0023 | FS 1-Shot: 0.6468
+Epoch 80 | Train Acc: 0.7736 | Test Acc: 0.0024 | FS 1-Shot: 0.6452
+Epoch 90 | Train Acc: 0.8146 | Test Acc: 0.0025 | FS 1-Shot: 0.6568
+Epoch 100 | Train Acc: 0.8497 | Test Acc: 0.0026 | FS 1-Shot: 0.6304
+Epoch 110 | Train Acc: 0.8774 | Test Acc: 0.0027 | FS 1-Shot: 0.6776
+Epoch 120 | Train Acc: 0.9026 | Test Acc: 0.0027 | FS 1-Shot: 0.6604
+Epoch 130 | Train Acc: 0.9223 | Test Acc: 0.0027 | FS 1-Shot: 0.6892
+Epoch 140 | Train Acc: 0.9369 | Test Acc: 0.0027 | FS 1-Shot: 0.6424
+Epoch 150 | Train Acc: 0.9447 | Test Acc: 0.0026 | FS 1-Shot: 0.6584
+
+========================================
+BACKBONE EXTRACTION VERIFICATION
+Max Absolute Feature Value: 1.0000
+========================================
+
+--- Running Final Few-Shot Sweep ---

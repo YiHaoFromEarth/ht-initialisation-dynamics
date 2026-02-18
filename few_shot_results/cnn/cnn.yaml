@@ -1,6 +1,10 @@
 experiment_metadata:
-  name: "CNN_REPLICATION_TEST"
+  name: "CNN_HT_WINNER_RUN"
   output_root: "./few_shot_results/cnn"
+  comment: >
+    Removed last MaxPool layer that was crushing the heavy-tailed activations
+    Added a dropout layer to compensate and prevent memorisation
+    Lowered learning rate and g to add stability
 
 model:
   class_name: "ResearchCNN"
