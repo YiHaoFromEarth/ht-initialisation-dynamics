@@ -9,17 +9,17 @@ class GeneralMLP(nn.Module):
 
         # Mapping string to PyTorch activation modules
         activations = {
-            'tanh': nn.Tanh(),
-            'relu': nn.ReLU(),
-            'sigmoid': nn.Sigmoid()
+            'tanh': nn.Tanh,
+            'relu': nn.ReLU,
+            'sigmoid': nn.Sigmoid
         }
-        activation = activations.get(activation_name.lower(), nn.Tanh())
+        activation = activations.get(activation_name.lower(), nn.Tanh)
 
         layers = []
 
         # 1. Input Layer
         layers.append(nn.Linear(input_size, hidden_size, bias=bias))
-        layers.append(activation)
+        layers.append(activation())
         if dropout_p > 0:
             layers.append(nn.Dropout(dropout_p))
 
@@ -28,7 +28,7 @@ class GeneralMLP(nn.Module):
         # Depth=2 means Input->Hidden->Hidden->Output
         for _ in range(depth - 1):
             layers.append(nn.Linear(hidden_size, hidden_size, bias=bias))
-            layers.append(activation)
+            layers.append(activation())
             if dropout_p > 0:
                 layers.append(nn.Dropout(dropout_p))
 
@@ -97,11 +97,11 @@ class GeneralCNN(nn.Module):
 
         # 1. Setup Activations
         activations = {
-            'tanh': nn.Tanh(),
-            'relu': nn.ReLU(),
-            'sigmoid': nn.Sigmoid()
+            'tanh': nn.Tanh,
+            'relu': nn.ReLU,
+            'sigmoid': nn.Sigmoid
         }
-        activation = activations.get(activation_name.lower(), nn.Tanh())
+        activation = activations.get(activation_name.lower(), nn.Tanh)
 
         layers = []
         current_channels = input_channels
@@ -111,13 +111,7 @@ class GeneralCNN(nn.Module):
         for i in range(depth):
             layers.append(nn.Conv2d(current_channels, out_channels,
                                     kernel_size=3, padding=1, bias=bias))
-
-            # Each layer needs its own UNIQUE activation instance
-            if activation_name.lower() == 'tanh':
-                layers.append(nn.Tanh())
-            else:
-                layers.append(nn.ReLU())
-
+            layers.append(activation())
             layers.append(nn.MaxPool2d(2))
             current_channels = out_channels
             out_channels *= 2
