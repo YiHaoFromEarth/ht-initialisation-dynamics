@@ -8,7 +8,17 @@ from datetime import datetime
 from scipy.stats import levy_stable
 from torchinfo import summary
 from pathlib import Path
-from ml_library import model_factory, load_master_config, get_universal_loader, get_dataset_class, get_transform, set_seed, optimizer_factory
+from ml_library import (
+    model_factory,
+    load_master_config,
+    get_universal_loader,
+    get_dataset_class,
+    get_transform,
+    set_seed,
+    optimizer_factory,
+    get_hooked_features,
+    HookManager,
+)
 
 def init_heavy_tailed(tensor, alpha, g, seed_offset=0, base_seed=0):
     """
@@ -52,14 +62,11 @@ def apply_heavy_tailed_init(model, alpha, g, base_seed=0):
     return model
 
 @torch.no_grad()
-def evaluate_few_shot(model, dev, valid_ds, n_way=5, k_shot=5, n_episodes=500):
+def evaluate_few_shot(model, hook_manager, dev, valid_ds, n_way=5, k_shot=5, n_episodes=500):
+    """
+    Evaluates few-shot performance by capturing raw features via forward hooks.
+    """
     model.eval()
-    # 1. Feature Extraction Logic
-    if hasattr(model, 'get_features'):
-        backbone = model.get_features
-    else:
-        # Fallback for legacy compatibility
-        backbone = nn.Sequential(*list(model.sequential.children())[:-1])
 
     # 2. Organize data by class for sampling
     class_data = {}
@@ -74,6 +81,7 @@ def evaluate_few_shot(model, dev, valid_ds, n_way=5, k_shot=5, n_episodes=500):
     available_classes = list(class_data.keys())
     accuracies = []
 
+    # 3. Episode Loop
     for _ in range(n_episodes):
         episode_classes = np.random.choice(available_classes, n_way, replace=False)
         prototypes = []
@@ -88,18 +96,19 @@ def evaluate_few_shot(model, dev, valid_ds, n_way=5, k_shot=5, n_episodes=500):
             support_imgs = torch.stack([imgs[idx] for idx in indices[:k_shot]]).to(dev)
             query_imgs = torch.stack([imgs[idx] for idx in indices[k_shot:]]).to(dev)
 
-            # Use the backbone_func directly
-            features = backbone(support_imgs)
-            prototypes.append(features.mean(0))
+            # Use our hook helper to get raw expert signals
+            support_features = get_hooked_features(model, hook_manager, support_imgs)
+            prototypes.append(support_features.mean(0))
 
-            queries.append(backbone(query_imgs))
+            queries.append(get_hooked_features(model, hook_manager, query_imgs))
             query_labels.extend([i] * len(query_imgs))
 
         prototypes = torch.stack(prototypes)
         queries = torch.cat(queries)
         query_labels = torch.tensor(query_labels).to(dev)
 
-        # Normalisation as proxy for cosine distance
+        # 4. Normalization as proxy for cosine distance
+        # This acts on the un-squashed, high-magnitude HT features
         support_norm = F.normalize(prototypes, p=2, dim=-1)
         query_norm = F.normalize(queries, p=2, dim=-1)
 
@@ -149,6 +158,50 @@ def train_model_ht(model_input, ht_config, model_params, optim_class, optim_para
     # Now move to device after weights are set
     model = model.to(device)
 
+    # --- 2.2 Dynamic Hook Initialization (New) ---
+    # Retrieve path from hyperparams or find the last layer in model.features
+    hook_path = hyperparams.get('hook_layers')
+
+    if not hook_path:
+        # Default: Target the very last index of the Sequential 'features' block
+        last_idx = len(list(model.features.children())) - 1
+        print(list(model.features.children()))
+        hook_path = f"features.{last_idx}"
+
+    feature_hook = HookManager()
+    try:
+        feature_hook.attach(model, hook_path)
+        print(f"Research Probe successfully attached to: {hook_path}")
+    except Exception as e:
+        print(f"Warning: Failed to attach hook to {hook_path}. Error: {e}")
+
+    # Visual Hook Summary: Verifying the actual binding
+    print("\n" + "="*60)
+    print("RESEARCH PROBE: ARCHITECTURAL BINDING CONFIRMATION")
+    print("="*60)
+
+    # 1. Identify the physical module target
+    try:
+        actual_target = model.get_submodule(hook_path)
+    except AttributeError:
+        actual_target = model
+        for part in hook_path.split('.'):
+            actual_target = actual_target[int(part)] if part.isdigit() else getattr(actual_target, part)
+
+    # 2. Print every layer in 'features' explicitly by index
+    if hasattr(model, 'features'):
+        for i, module in enumerate(model.features):
+            name = f"features.{i}"
+            is_hooked = " <--- [PROBE ATTACHED HERE]" if module is actual_target else ""
+            print(f"[{name:.<25}]: {module.__class__.__name__:<15}{is_hooked}")
+
+    # 3. Print the classifier separately
+    if hasattr(model, 'classifier'):
+        is_hooked = " <--- [PROBE ATTACHED HERE]" if model.classifier is actual_target else ""
+        print(f"[{'classifier':.<25}]: {model.classifier.__class__.__name__:<15}{is_hooked}")
+
+    print("="*60 + "\n")
+
     # 3. Directory and Metadata Setup
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     folder_name = f"{model_name}_LR{optim_params.get('lr', 'N/A')}_BS{data_config['batch_size']}_{timestamp}_s{seed}"
@@ -164,6 +217,8 @@ def train_model_ht(model_input, ht_config, model_params, optim_class, optim_para
         # Assumes MNIST/Omniglot-style 1-channel input
         stats = summary(model, input_size=(data_config['batch_size'], 1, 28, 28), verbose=0)
         f.write(str(stats))
+        # Log the hooked layer for reproducibility
+        f.write(f"\n\nEvaluator Hook Layer: {hook_path}\n")
 
     # 6. Training Loop Logic
     criterion = nn.CrossEntropyLoss()
@@ -216,6 +271,7 @@ def train_model_ht(model_input, ht_config, model_params, optim_class, optim_para
                     # We run a smaller subset (100 episodes) during training for speed
                     fs_accuracies = evaluate_few_shot(
                         model,
+                        feature_hook,
                         device,
                         loaders['test_dataset'],
                         n_way=5,
@@ -272,7 +328,7 @@ def train_model_ht(model_input, ht_config, model_params, optim_class, optim_para
     with torch.no_grad():
         # Create a dummy input matching your dataset shape
         dummy_input = torch.randn(1, 1, 28, 28).to(device)
-        raw_features = model.get_features(dummy_input)
+        raw_features = get_hooked_features(model, feature_hook, dummy_input)
 
         feat_max = raw_features.abs().max().item()
 
@@ -283,8 +339,8 @@ def train_model_ht(model_input, ht_config, model_params, optim_class, optim_para
 
     # 9. Prototypical Few-Shot Evaluation
     print("--- Running Final Few-Shot Sweep ---")
-    fs_1s = evaluate_few_shot(model, device, loaders['test_dataset'], n_way=5, k_shot=1, n_episodes=500)
-    fs_5s = evaluate_few_shot(model, device, loaders['test_dataset'], n_way=5, k_shot=5, n_episodes=500)
+    fs_1s = evaluate_few_shot(model, feature_hook, device, loaders['test_dataset'], n_way=5, k_shot=1, n_episodes=500)
+    fs_5s = evaluate_few_shot(model, feature_hook, device, loaders['test_dataset'], n_way=5, k_shot=5, n_episodes=500)
 
     np.savetxt(f"{run_dir}/fs_1shot_raw.csv", fs_1s, delimiter=",")
     np.savetxt(f"{run_dir}/fs_5shot_raw.csv", fs_5s, delimiter=",")

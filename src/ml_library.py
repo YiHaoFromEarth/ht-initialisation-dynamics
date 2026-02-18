@@ -14,6 +14,47 @@ from datetime import datetime
 from torch.utils.data import DataLoader, TensorDataset
 from torchvision import datasets, transforms
 
+class HookManager:
+    def __init__(self):
+        self.captured_output = None
+        self._hook_handle = None
+
+    def _hook_fn(self, module, input, output):
+        # We detach to avoid interfering with the computational graph
+        self.captured_output = output.detach()
+
+    def attach(self, model, layer_path):
+        """
+        Attaches to a layer based on a string path (e.g., 'features.6')
+        or a direct attribute name.
+        """
+        # Remove any existing hook before attaching a new one
+        self.remove()
+
+        # Navigate the model hierarchy to find the target module
+        target_layer = model
+        for part in layer_path.split('.'):
+            if part.isdigit():
+                target_layer = target_layer[int(part)]
+            else:
+                target_layer = getattr(target_layer, part)
+
+        self._hook_handle = target_layer.register_forward_hook(self._hook_fn)
+        return self
+
+    def remove(self):
+        """Cleanly detaches the hook."""
+        if self._hook_handle is not None:
+            self._hook_handle.remove()
+            self._hook_handle = None
+
+def get_hooked_features(model, hook_manager, imgs):
+    # Trigger the forward pass
+    # The hook inside the manager catches the data before the final activation
+    model(imgs)
+    # Flatten the captured pre-activation experts
+    return torch.flatten(hook_manager.captured_output, 1)
+
 def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
