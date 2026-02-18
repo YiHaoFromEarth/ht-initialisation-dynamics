@@ -8,6 +8,7 @@ import pandas as pd
 import json
 import architectures
 import yaml
+import sys
 from pathlib import Path
 from torchinfo import summary
 from datetime import datetime
@@ -47,6 +48,24 @@ class HookManager:
         if self._hook_handle is not None:
             self._hook_handle.remove()
             self._hook_handle = None
+
+class TeeLogger:
+    """Clones stdout to a file while still printing to terminal."""
+    def __init__(self, filepath):
+        self.terminal = sys.stdout
+        self.log = open(filepath, "w")
+
+    def write(self, message):
+        self.terminal.write(message)
+        self.log.write(message)
+
+    def flush(self):
+        # This is needed for compatibility with some python print behaviors
+        self.terminal.flush()
+        self.log.flush()
+
+    def close(self):
+        self.log.close()
 
 def get_hooked_features(model, hook_manager, imgs):
     # Trigger the forward pass
@@ -211,126 +230,147 @@ def train_model(model_input, model_params, optim_class, optim_params,
     """
     Foundational orchestrator to initialize, train, and log an ML experiment.
     """
-    # 1. Strict Determinism
-    set_seed(seed)
+    # Store the original terminal handle
+    original_stdout = sys.stdout
+    logger = None
 
-    device = hyperparams.get('device', 'cpu')
+    try:
+        # 1. Strict Determinism
+        set_seed(seed)
 
-    # 2. Flexible Model Acquisition
-    if isinstance(model_input, nn.Module):
-        # We were passed a pre-initialized model instance
-        model = model_input
-        model_name = model.__class__.__name__
-    else:
-        # Standard path: Initialize from class and params
-        m_args = model_params.get('args', [])
-        m_kwargs = model_params.get('kwargs', {})
-        model = model_factory(model_input, *m_args, **m_kwargs)
-        model_name = model_input.__name__
-    if model is None: return None # Graceful exit on init failure
-    model = model.to(device)
+        device = hyperparams.get('device', 'cpu')
 
-    # 3. Directory and Metadata Setup
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    folder_name = f"{model_name}_LR{optim_params.get('lr', 'N/A')}_BS{data_config['batch_size']}_{timestamp}_s{seed}"
-    run_dir = Path(output_root) / folder_name
-    run_dir.mkdir(parents=True, exist_ok=True)
+        # 2. Flexible Model Acquisition
+        if isinstance(model_input, nn.Module):
+            # We were passed a pre-initialized model instance
+            model = model_input
+            model_name = model.__class__.__name__
+        else:
+            # Standard path: Initialize from class and params
+            m_args = model_params.get('args', [])
+            m_kwargs = model_params.get('kwargs', {})
+            model = model_factory(model_input, *m_args, **m_kwargs)
+            model_name = model_input.__name__
+        if model is None: return None # Graceful exit on init failure
+        model = model.to(device)
 
-    # 4. Optimizer Initialization (via Factory)
-    optimizer = optimizer_factory(optim_class, model.parameters(), **optim_params)
-    if optimizer is None: return None
+        # 3. Directory and Metadata Setup
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        folder_name = f"{model_name}_LR{optim_params.get('lr', 'N/A')}_BS{data_config['batch_size']}_{timestamp}_s{seed}"
+        run_dir = Path(output_root) / folder_name
+        run_dir.mkdir(parents=True, exist_ok=True)
 
-    # 5. Architecture Documentation
-    with open(run_dir / "architecture.txt", "w") as f:
-        # Assumes MNIST/Omniglot-style 1-channel input
-        stats = summary(model, input_size=(data_config['batch_size'], 1, 28, 28), verbose=0)
-        f.write(str(stats))
+        # Start logging console output to file
+        sys.stdout = TeeLogger(run_dir / "console_output.txt")
+        print(f"Logging initialized in: {run_dir}")
 
-    # 6. Training Loop Logic
-    criterion = nn.CrossEntropyLoss()
-    history = []
+        # 4. Optimizer Initialization (via Factory)
+        optimizer = optimizer_factory(optim_class, model.parameters(), **optim_params)
+        if optimizer is None: return None
 
-    for epoch in range(1, hyperparams['epochs'] + 1):
-            model.train()
-            train_loss, train_correct, train_total = 0.0, 0, 0
+        # 5. Architecture Documentation
+        with open(run_dir / "architecture.txt", "w") as f:
+            # Assumes MNIST/Omniglot-style 1-channel input
+            stats = summary(model, input_size=(data_config['batch_size'], 1, 28, 28), verbose=0)
+            f.write(str(stats))
 
-            # Training Phase
-            for inputs, labels in loaders['train']:
-                inputs, labels = inputs.to(device), labels.to(device)
+        # 6. Training Loop Logic
+        criterion = nn.CrossEntropyLoss()
+        history = []
 
-                optimizer.zero_grad()
-                outputs = model(inputs)
-                loss = criterion(outputs, labels)
-                loss.backward()
+        for epoch in range(1, hyperparams['epochs'] + 1):
+                model.train()
+                train_loss, train_correct, train_total = 0.0, 0, 0
 
-                if 'grad_clip' in hyperparams:
-                    torch.nn.utils.clip_grad_norm_(model.parameters(), hyperparams['grad_clip'])
+                # Training Phase
+                for inputs, labels in loaders['train']:
+                    inputs, labels = inputs.to(device), labels.to(device)
 
-                optimizer.step()
+                    optimizer.zero_grad()
+                    outputs = model(inputs)
+                    loss = criterion(outputs, labels)
+                    loss.backward()
 
-                train_loss += loss.item()
-                _, predicted = outputs.max(1)
-                train_total += labels.size(0)
-                train_correct += predicted.eq(labels).sum().item()
+                    if 'grad_clip' in hyperparams:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), hyperparams['grad_clip'])
 
-            # 7. Periodic Logging and Test Evaluation
-            if epoch % log_freq == 0 or epoch == 1:
-                model.eval() # Set model to evaluation mode (Freezes Dropout/Batchnorm)
-                test_loss, test_correct, test_total = 0.0, 0, 0
+                    optimizer.step()
 
-                with torch.no_grad(): # Disable gradient calculation for efficiency
-                    for inputs, labels in loaders['test']:
-                        inputs, labels = inputs.to(device), labels.to(device)
-                        outputs = model(inputs)
-                        loss = criterion(outputs, labels)
+                    train_loss += loss.item()
+                    _, predicted = outputs.max(1)
+                    train_total += labels.size(0)
+                    train_correct += predicted.eq(labels).sum().item()
 
-                        test_loss += loss.item()
-                        _, predicted = outputs.max(1)
-                        test_total += labels.size(0)
-                        test_correct += predicted.eq(labels).sum().item()
+                # 7. Periodic Logging and Test Evaluation
+                if epoch % log_freq == 0 or epoch == 1:
+                    model.eval() # Set model to evaluation mode (Freezes Dropout/Batchnorm)
+                    test_loss, test_correct, test_total = 0.0, 0, 0
 
-                metrics = {
-                    'epoch': epoch,
-                    'train_loss': train_loss / len(loaders['train']),
-                    'train_acc': train_correct / train_total,
-                    'test_loss': test_loss / len(loaders['test']),
-                    'test_acc': test_correct / test_total
-                }
+                    with torch.no_grad(): # Disable gradient calculation for efficiency
+                        for inputs, labels in loaders['test']:
+                            inputs, labels = inputs.to(device), labels.to(device)
+                            outputs = model(inputs)
+                            loss = criterion(outputs, labels)
 
-                history.append(metrics)
-                print(f"Epoch {epoch} | Train Acc: {metrics['train_acc']:.4f} | Test Acc: {metrics['test_acc']:.4f}")
+                            test_loss += loss.item()
+                            _, predicted = outputs.max(1)
+                            test_total += labels.size(0)
+                            test_correct += predicted.eq(labels).sum().item()
 
-    # 8. Final Artifact Export
-    pd.DataFrame(history).to_csv(run_dir / "train_log.csv", index=False)
-    torch.save({
-        'model_state': model.state_dict(),
-        'optim_state': optimizer.state_dict(),
-        'hyperparams': hyperparams,
-        'seed': seed
-    }, run_dir / "final_model.pth")
+                    metrics = {
+                        'epoch': epoch,
+                        'train_loss': train_loss / len(loaders['train']),
+                        'train_acc': train_correct / train_total,
+                        'test_loss': test_loss / len(loaders['test']),
+                        'test_acc': test_correct / test_total
+                    }
 
-    # Inside train_model, before json.dump:
-    # We create a copy so we don't break the actual 'live' dictionary
-    saveable_data_config = data_config.copy()
+                    history.append(metrics)
+                    print(f"Epoch {epoch} | Train Acc: {metrics['train_acc']:.4f} | Test Acc: {metrics['test_acc']:.4f}")
 
-    # Convert the Compose object into a readable string
-    if 'transform' in saveable_data_config:
-        saveable_data_config['transform'] = str(saveable_data_config['transform'])
+        # 8. Final Artifact Export
+        pd.DataFrame(history).to_csv(run_dir / "train_log.csv", index=False)
+        torch.save({
+            'model_state': model.state_dict(),
+            'optim_state': optimizer.state_dict(),
+            'hyperparams': hyperparams,
+            'seed': seed
+        }, run_dir / "final_model.pth")
 
-    # Save exact configuration for audit trail
-    config_dump = {
-        'model': model_name,
-        'model_params': model_params,
-        'optimizer': optim_class.__name__,
-        'optimizer_params': optim_params,
-        'hyperparams': hyperparams,
-        'data_config': saveable_data_config,
-        'seed': seed
-    }
-    with open(run_dir / "run_config.json", "w") as f:
-        json.dump(config_dump, f, indent=4)
+        # Inside train_model, before json.dump:
+        # We create a copy so we don't break the actual 'live' dictionary
+        saveable_data_config = data_config.copy()
 
-    return model, run_dir
+        # Convert the Compose object into a readable string
+        if 'transform' in saveable_data_config:
+            saveable_data_config['transform'] = str(saveable_data_config['transform'])
+
+        # Save exact configuration for audit trail
+        config_dump = {
+            'model': model_name,
+            'model_params': model_params,
+            'optimizer': optim_class.__name__,
+            'optimizer_params': optim_params,
+            'hyperparams': hyperparams,
+            'data_config': saveable_data_config,
+            'seed': seed
+        }
+        with open(run_dir / "run_config.json", "w") as f:
+            json.dump(config_dump, f, indent=4)
+
+        return model, run_dir
+
+    except Exception as e:
+        # If it crashes, print the error so it's caught in the log too
+        print(f"\nFATAL ERROR during run: {e}")
+        raise e # Re-raise so we see the traceback
+
+    finally:
+        # RESTORE THE TERMINAL
+        sys.stdout = original_stdout
+        if logger is not None:
+            logger.close()
+        print(f"--- Run Complete. Console logging detached ---")
 
 if __name__ == "__main__":
     from architectures import GeneralMLP
