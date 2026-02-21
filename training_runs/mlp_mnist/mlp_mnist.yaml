@@ -1,0 +1,48 @@
+experiment_metadata:
+  name: "MLP_MNIST_ANALYSIS"
+  output_root: "./training_runs/mlp_mnist"
+  comment: >
+    Pivoting away from few-shot replication to a more in-depth analysis of MLP training dynamics on MNIST.
+    Focusing on understand the fundamental training behavior and weight evolution of a simple MLP with heavy-tail initialization.
+    Will save weight checkpoints at each epoch for later physics-based analysis of the training trajectory using RMT and MFT.
+
+model:
+  class_name: "GeneralMLP"
+  params:
+    kwargs:
+      input_size: 784
+      hidden_size: 784
+      num_classes: 10
+      depth: 2
+      activation_name: "tanh"
+      bias: False
+
+optimizer:
+  class_name: "SGD"
+  params:
+    lr: 0.001
+    momentum: 0.0
+    weight_decay: 0.0
+
+data:
+  dataset_name: "MNIST"
+  batch_size: 128
+  use_gpu: true
+  fast_load: true
+  transforms:
+    - ToTensor: null
+    - Normalize:
+        mean: [0.1307]
+        std: [0.3081]
+
+heavy_tail:
+  enabled: true
+  alpha: 1.2
+  g: 1.0
+
+hyperparams:
+  epochs: 150
+  seed: 0
+  log_freq: 10
+  device: "cuda"
+  save_weights_history: true

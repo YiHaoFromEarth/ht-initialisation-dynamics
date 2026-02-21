@@ -16,8 +16,6 @@ from .ml_library import (
     get_transform,
     set_seed,
     optimizer_factory,
-    get_hooked_features,
-    HookManager,
     TeeLogger,
 )
 
@@ -114,49 +112,6 @@ def train_model_ht(model_input, ht_config, model_params, optim_class, optim_para
         # Now move to device after weights are set
         model = model.to(device)
 
-        # --- 3.2 Dynamic Hook Initialization (New) ---
-        # Retrieve path from hyperparams or find the last layer in model.features
-        hook_path = hyperparams.get('hook_layers')
-
-        if not hook_path:
-            # Default: Target the very last index of the Sequential 'features' block
-            last_idx = len(list(model.features.children())) - 1
-            hook_path = f"features.{last_idx}"
-
-        feature_hook = HookManager()
-        try:
-            feature_hook.attach(model, hook_path)
-            print(f"Research Probe successfully attached to: {hook_path}")
-        except Exception as e:
-            print(f"Warning: Failed to attach hook to {hook_path}. Error: {e}")
-
-        # Visual Hook Summary: Verifying the actual binding
-        print("\n" + "="*60)
-        print("RESEARCH PROBE: ARCHITECTURAL BINDING CONFIRMATION")
-        print("="*60)
-
-        # 1. Identify the physical module target
-        try:
-            actual_target = model.get_submodule(hook_path)
-        except AttributeError:
-            actual_target = model
-            for part in hook_path.split('.'):
-                actual_target = actual_target[int(part)] if part.isdigit() else getattr(actual_target, part)
-
-        # 2. Print every layer in 'features' explicitly by index
-        if hasattr(model, 'features'):
-            for i, module in enumerate(model.features):
-                name = f"features.{i}"
-                is_hooked = " <--- [PROBE ATTACHED HERE]" if module is actual_target else ""
-                print(f"[{name:.<25}]: {module.__class__.__name__:<15}{is_hooked}")
-
-        # 3. Print the classifier separately
-        if hasattr(model, 'classifier'):
-            is_hooked = " <--- [PROBE ATTACHED HERE]" if model.classifier is actual_target else ""
-            print(f"[{'classifier':.<25}]: {model.classifier.__class__.__name__:<15}{is_hooked}")
-
-        print("="*60 + "\n")
-
         # 4. Optimizer Initialization (via Factory)
         optimizer = optimizer_factory(optim_class, model.parameters(), **optim_params)
         if optimizer is None: return None
@@ -166,8 +121,12 @@ def train_model_ht(model_input, ht_config, model_params, optim_class, optim_para
             # Assumes MNIST/Omniglot-style 1-channel input
             stats = summary(model, input_size=(data_config['batch_size'], 1, 28, 28), verbose=0)
             f.write(str(stats))
-            # Log the hooked layer for reproducibility
-            f.write(f"\n\nEvaluator Hook Layer: {hook_path}\n")
+
+        # 5.1. Initial Weight Snapshot
+        if hyperparams.get('save_weights_history', False):
+            checkpoint_dir = run_dir / "checkpoints"
+            checkpoint_dir.mkdir(exist_ok=True)
+            torch.save(model.state_dict(), checkpoint_dir / f"weights_epoch_0.pth")
 
         # 6. Training Loop Logic
         criterion = nn.CrossEntropyLoss()
@@ -197,7 +156,7 @@ def train_model_ht(model_input, ht_config, model_params, optim_class, optim_para
                     train_correct += predicted.eq(labels).sum().item()
 
                 # 7. Periodic Logging and Test Evaluation
-                if epoch % log_freq == 0 or epoch == 1:
+                if epoch % log_freq == 0:
                     model.eval()
                     test_loss, test_correct, test_total = 0.0, 0, 0
 
@@ -213,34 +172,22 @@ def train_model_ht(model_input, ht_config, model_params, optim_class, optim_para
                             test_total += labels.size(0)
                             test_correct += predicted.eq(labels).sum().item()
 
-                    # B. Prototypical Few-Shot Evaluation
-                    # Requires 'test_dataset' to be passed in the loaders dict
-                    fs_mean = "N/A"
-                    if 'test_dataset' in loaders:
-                        # We run a smaller subset (100 episodes) during training for speed
-                        fs_accuracies = evaluate_few_shot(
-                            model,
-                            feature_hook,
-                            device,
-                            loaders['test_dataset'],
-                            n_way=5,
-                            k_shot=1,
-                            n_episodes=100,
-                        )
-                        fs_mean = np.mean(fs_accuracies)
-
                     metrics = {
                         'epoch': epoch,
                         'train_loss': train_loss / len(loaders['train']),
                         'train_acc': train_correct / train_total,
                         'test_loss': test_loss / len(loaders['test']),
                         'test_acc': test_correct / test_total,
-                        'fs_1shot_mean': fs_mean # Added for tracking HT embedding quality
                     }
 
                     history.append(metrics)
-                    fs_str = f" | FS 1-Shot: {fs_mean:.4f}" if isinstance(fs_mean, float) else ""
-                    print(f"Epoch {epoch} | Train Acc: {metrics['train_acc']:.4f} | Test Acc: {metrics['test_acc']:.4f}{fs_str}")
+                    print(f"Epoch {epoch} | Train Acc: {metrics['train_acc']:.4f} | Test Acc: {metrics['test_acc']:.4f}")
+
+                    # --- New: Periodic Weight Saving for Physics Analysis ---
+                    if hyperparams.get('save_weights_history', False):
+                        checkpoint_dir = run_dir / "checkpoints"
+                        checkpoint_dir.mkdir(exist_ok=True)
+                        torch.save(model.state_dict(), checkpoint_dir / f"weights_epoch_{epoch}.pth")
 
         # 8. Final Artifact Export
         pd.DataFrame(history).to_csv(run_dir / "train_log.csv", index=False)
@@ -271,28 +218,6 @@ def train_model_ht(model_input, ht_config, model_params, optim_class, optim_para
         }
         with open(run_dir / "run_config.json", "w") as f:
             json.dump(config_dump, f, indent=4)
-
-        # --- Extraction Logic Verification ---
-        model.eval()
-        with torch.no_grad():
-            # Create a dummy input matching your dataset shape
-            dummy_input = torch.randn(1, 1, 28, 28).to(device)
-            raw_features = get_hooked_features(model, feature_hook, dummy_input)
-
-            feat_max = raw_features.abs().max().item()
-
-            print("\n" + "="*40)
-            print("BACKBONE EXTRACTION VERIFICATION")
-            print(f"Max Absolute Feature Value: {feat_max:.4f}")
-            print("="*40 + "\n")
-
-        # 9. Prototypical Few-Shot Evaluation
-        print("--- Running Final Few-Shot Sweep ---")
-        fs_1s = evaluate_few_shot(model, feature_hook, device, loaders['test_dataset'], n_way=5, k_shot=1, n_episodes=500)
-        fs_5s = evaluate_few_shot(model, feature_hook, device, loaders['test_dataset'], n_way=5, k_shot=5, n_episodes=500)
-
-        np.savetxt(f"{run_dir}/fs_1shot_raw.csv", fs_1s, delimiter=",")
-        np.savetxt(f"{run_dir}/fs_5shot_raw.csv", fs_5s, delimiter=",")
 
         return model, run_dir
 
@@ -337,7 +262,8 @@ if __name__ == "__main__":
     }
 
     # 4. Five-Seed Sweep
-    seeds = range(5)
+    starting_seed = cfg['full_config']['hyperparams'].get('seed', 0)
+    seeds = range(starting_seed, starting_seed + 1)
     ht_config = cfg['full_config'].get('heavy_tail', {})
 
     for s in seeds:
