@@ -6,9 +6,9 @@ import torch
 import torch.optim as optim
 import pandas as pd
 import json
-import architectures
 import yaml
 import sys
+from . import architectures
 from pathlib import Path
 from torchinfo import summary
 from datetime import datetime

@@ -8,7 +8,7 @@ from datetime import datetime
 from scipy.stats import levy_stable
 from torchinfo import summary
 from pathlib import Path
-from ml_library import (
+from .ml_library import (
     model_factory,
     load_master_config,
     get_universal_loader,
