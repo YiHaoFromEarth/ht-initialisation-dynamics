@@ -1,6 +1,6 @@
 experiment_metadata:
   name: "MLP_MNIST_ANALYSIS"
-  output_root: "./training_runs/mlp_mnist"
+  output_root: "./training_runs/mlp784_mnist"
   comment: >
     Pivoting away from few-shot replication to a more in-depth analysis of MLP training dynamics on MNIST.
     Focusing on understand the fundamental training behavior and weight evolution of a simple MLP with heavy-tail initialization.

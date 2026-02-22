@@ -1,0 +1,18 @@
+Logging initialized in: training_runs/mlp64_mnist/Gaussian_Baseline/GeneralMLP_LR0.001_BS128_20260222_112842_s0
+Overwriting weights with Heavy-Tailed Distribution (α=2.0, g=1.0)
+Applying HT Init: alpha=2.0, g=1.0, seed=0
+Epoch 10 | Train Acc: 0.8601 | Test Acc: 0.8684
+Epoch 20 | Train Acc: 0.8933 | Test Acc: 0.8975
+Epoch 30 | Train Acc: 0.9081 | Test Acc: 0.9096
+Epoch 40 | Train Acc: 0.9172 | Test Acc: 0.9178
+Epoch 50 | Train Acc: 0.9240 | Test Acc: 0.9241
+Epoch 60 | Train Acc: 0.9294 | Test Acc: 0.9289
+Epoch 70 | Train Acc: 0.9338 | Test Acc: 0.9337
+Epoch 80 | Train Acc: 0.9376 | Test Acc: 0.9374
+Epoch 90 | Train Acc: 0.9409 | Test Acc: 0.9399
+Epoch 100 | Train Acc: 0.9441 | Test Acc: 0.9414
+Epoch 110 | Train Acc: 0.9468 | Test Acc: 0.9430
+Epoch 120 | Train Acc: 0.9490 | Test Acc: 0.9443
+Epoch 130 | Train Acc: 0.9511 | Test Acc: 0.9462
+Epoch 140 | Train Acc: 0.9533 | Test Acc: 0.9473
+Epoch 150 | Train Acc: 0.9548 | Test Acc: 0.9493
