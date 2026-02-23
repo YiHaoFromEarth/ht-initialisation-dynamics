@@ -1,0 +1,173 @@
+\documentclass[11pt,oneside]{report}
+
+% PACKAGES
+\usepackage{graphicx}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage[a4paper,width=150mm,top=25mm,bottom=25mm,bindingoffset=6mm]{geometry}
+\usepackage{fancyhdr}
+\usepackage{parskip}
+\usepackage{hyperref}
+\usepackage{amsmath}
+\usepackage[acronym]{glossaries}
+\usepackage{lipsum} %DUMMY TEXT
+\usepackage[style=nature, backend=biber]{biblatex}
+
+% CONFIGS
+\pagestyle{fancy}
+\setlength{\headheight}{14.49998pt}
+\fancyhead{}
+\fancyhead[RO,LE]{Heavy-Tailed Initialisation in the Lazy-to-Rich Transition of Neural Dynamics}
+\fancyfoot{}
+\fancyfoot[LO,CE]{\ifnum\value{chapter}=0\else \leftmark \fi}
+\fancyfoot[LE,RO]{\thepage}
+\hypersetup{
+    pdfauthor = {Yi Hao},
+    pdftitle = {Heavy-Tailed Initialisation in the Lazy-to-Rich Transition of Neural Dynamics},
+    colorlinks,
+    linkcolor={blue},
+    citecolor={blue},
+    linkcolor={blue},
+    citecolor={blue}
+}
+\PassOptionsToPackage{unicode}{hyperref}
+
+% MACROS
+% essentials
+\renewcommand{\headrulewidth}{0.4pt}
+\renewcommand{\footrulewidth}{0.4pt}
+% non-essentials (some examples)
+\newcommand{\unit}[1]{\ensuremath{\, \mathrm{#1}}}  % makes writing units simpler
+\renewcommand{\thefootnote}{\emph{\alph{footnote}}} % italic letters footnote
+
+% PATHS
+\graphicspath{ {imgs/} }
+
+% BIB SETUP
+\addbibresource{references.bib}
+
+
+% <><><><><><><><><><><><><><><><><><><><><><>
+\begin{document}
+
+% ---------------------------------------------------------
+% PAGE 1: TITLE PAGE
+% ---------------------------------------------------------
+\pagenumbering{arabic} % Start numbering here
+\begin{titlepage}
+	\addcontentsline{toc}{chapter}{Title Page} % Add to TOC
+    \begin{center}
+        \vspace*{1cm}
+        
+        \Huge
+        \textbf{Heavy-Tailed Initialisation in the Lazy-to-Rich Transition of Neural Dynamics}
+        
+        \vspace{1.5cm}
+        
+        \Large{Yi Hao}
+        
+        \vfill
+        
+        \large
+        A thesis presented for the degree of\\
+        Bachelor of Science (Honours) (Physics)
+        
+        \vspace{0.8cm}
+        
+        \includegraphics[width=0.4\textwidth]{usyd_logo.jpg}
+        
+        \large
+        School of Physics\\
+        Faculty of Science\\
+        The University of Sydney\\
+        Australia\\
+        \today
+
+        \vfill
+
+        {\Large Supervisor: Prof.\;Pulin Gong}
+        
+        \vspace{1cm}
+        \large{1} % Manually placing the page number 1 at the bottom
+    \end{center}
+\end{titlepage}
+\setcounter{page}{2}
+
+% ---------------------------------------------------------
+% PAGE 2: ABSTRACT
+% ---------------------------------------------------------
+\clearpage
+\addcontentsline{toc}{chapter}{Abstract} % Add to TOC before the chapter starts
+\chapter*{Abstract}
+\lipsum[1]
+
+% ---------------------------------------------------------
+% PAGE 3: STATEMENTS & ACKNOWLEDGEMENTS
+% ---------------------------------------------------------
+\clearpage
+% Anchor both to Page 3 in the TOC
+\addcontentsline{toc}{chapter}{Statement of Originality}
+\addcontentsline{toc}{chapter}{Acknowledgements}
+\addcontentsline{toc}{chapter}{Statement of Contribution}
+
+\chapter*{Statements and Acknowledgements}
+
+\section*{Statement of Originality}
+I certify that this thesis contains work carried out by myself except where otherwise acknowledged.
+\vspace{0.5cm}
+\noindent Signed: \rule{4cm}{0.4pt} \hfill Date: \today
+
+\section*{Acknowledgements}
+\lipsum[2]
+
+\section*{Statement of Contribution}
+\lipsum[3]
+
+% ---------------------------------------------------------
+% PAGE 4: TABLE OF CONTENTS
+% ---------------------------------------------------------
+% Rule: If this takes >1 page, only the first counts toward the 40 limit.
+\clearpage
+\addcontentsline{toc}{chapter}{Contents}
+\tableofcontents
+\clearpage
+
+% ---------------------------------------------------------
+% MAIN CONTENT (Page 5+)
+% ---------------------------------------------------------
+
+\chapter{Introduction}
+\label{chap:intro}
+\lipsum[4-6]
+
+\chapter{Literature Review}
+\label{chap:review}
+\lipsum[7-10]
+
+\chapter{Methodology}
+\label{chap:method}
+
+\chapter{Results and Discussion}
+\label{chap:results}
+
+\chapter{Conclusion}
+\label{chap:conclusion}
+
+% ---------------------------------------------------------
+% REFERENCES
+% ---------------------------------------------------------
+% Only the first page counts toward the 40-page limit.
+\newpage
+\addcontentsline{toc}{chapter}{References}
+\nocite{*}
+\printbibliography[heading=bibintoc, title={References}]
+
+% ---------------------------------------------------------
+% APPENDICES
+% ---------------------------------------------------------
+% Not part of the 40-page limit.
+\appendix
+\chapter{Computer Code}
+Relevant snippets of the PyTorch implementation and the Lévy-stable initialization logic are included here. The full repository can be found at: \url{https://github.com/YiHaoFromEarth/ht-initialisation-dynamics}
+
+\end{document}

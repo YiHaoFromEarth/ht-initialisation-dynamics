@@ -229,3 +229,16 @@ data/
 # Old Code and Results
 old_code/
 old_results/
+
+# LaTeX intermediate files and output
+*.aux
+*.bbl
+*.bcf
+*.blg
+*.lof
+*.log
+*.out
+*.run.xml
+*.synctex.gz
+*.toc
+thesis/thesis.pdf
