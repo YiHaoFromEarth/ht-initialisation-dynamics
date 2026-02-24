@@ -142,7 +142,12 @@ I certify that this thesis contains work carried out by myself except where othe
 
 \chapter{Literature Review}
 \label{chap:review}
-\lipsum[7-10]
+\subsection{RMT as a Zero-Information Hypothesis}
+The high levels of success deep neural networks have displayed in a variety of fields have led to much interest in understanding how they store the information required for a particular task. In particular, methods from Random Matrix Theory (RMT) are highly useful for this, serving as a null hypothesis. If the weight matrix of a neural network follows RMT predictions, it suggests that they are random and do not contain specific information.
+
+However, not all methods from RMT are equally suitable for testing the zero-information hypothesis. For example, the distribution of singular values is highly sensitive to the specific type of random matrix. In contrast the nearest-neighbour spacing distribution and number variance are universal properties of random matrices, being invariant to dimension or initialisation. 
+
+In principle, it is possible for information to be stored in weights that follow RMT predictions, for example a teacher-student setup with a random teacher. However, RMT analysis is particularly useful for image classification tasks on datasets like MNIST or CIFAR, where rules exist that can be encoded in a low-rank matrix.
 
 \chapter{Methodology}
 \label{chap:method}

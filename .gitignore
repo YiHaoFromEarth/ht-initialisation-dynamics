@@ -230,6 +230,9 @@ data/
 old_code/
 old_results/
 
+# VSCode stuff
+.vscode/
+
 # LaTeX intermediate files and output
 *.aux
 *.bbl
