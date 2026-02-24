@@ -128,7 +128,14 @@ def get_universal_loader(dataset_class, data_config, **dataset_kwargs):
 
     if fast_load and torch.cuda.is_available() and use_gpu:
         print(f"Fast-loading {dataset_class.__name__} to {device}...")
-        imgs = torch.stack([img for img, _ in dataset_raw]).to(device)
+        # Check if we need to convert to tensor on the fly for fast-loading
+        first_item = dataset_raw[0][0]
+        if not isinstance(first_item, torch.Tensor):
+            from torchvision.transforms import ToTensor
+            converter = ToTensor()
+            imgs = torch.stack([converter(img) for img, _ in dataset_raw]).to(device)
+        else:
+            imgs = torch.stack([img for img, _ in dataset_raw]).to(device)
         try:
             lbls = torch.tensor([lbl for _, lbl in dataset_raw]).to(device)
         except Exception:
