@@ -1,0 +1,57 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage[left=2cm,right=2cm,top=2cm,bottom=2cm]{geometry}
+\author{Yi Hao \vspace{0.35cm} \\ Supervisor: Prof.\;Pulin Gong}
+\title{Exploring Extended Criticality in Heavy-Tailed Neural Networks}
+\begin{document}
+\maketitle
+\section{Abstract}
+Neural networks have been successfully applied to a variety of fields, from generative art to clinical diagnosis. This has led to a great deal of interest in understanding their dynamical and computational principles, but a complete understanding is still lacking. Particularly, heavy-tailed neural networks show promising computational advantages over traditional Gaussian equivalents, exhibiting an extended critical regime with rich propagation dynamics. This research project aims to further develop our understanding of these networks as a complete dynamical system. We plan to study their internals and evolution using methods from mean field theory (MFT) and random matrix theory (RMT), comparing them to a Gaussian baseline. A particular area of interest is the impact on different learning regimes, from lazy to rich learning. The deepened understanding of heavy-tailed neural dynamics has the potential to inform the development of more robust and efficient neural architectures, with applications in key fields like few-shot and continual learning.
+\section{Aim and Research Questions}
+\subsection{Primary Aim}
+To investigate the influence of Lévy $\alpha$-stable weight initializations ($\alpha < 2$) on the structural evolution, spectral stability, and learning regimes of deep neural networks within the framework of mean field and random matrix theories.
+\subsection{Research Questions}
+\begin{itemize}
+\item How does the heavy-tailed initialization ($\alpha < 2$) dictate the conservation or rotation of the principal singular vectors throughout the training trajectory compared to Gaussian limits?
+\item To what extent do heavy-tailed distributions induce a non-uniform distribution of learning burden across layers, and how does this affect the transition from lazy to rich learning regimes?
+\item How does the emergence of a discrete spectral outlier structure in heavy-tailed networks influence the model's robustness to structural perturbations (ablation) versus the distributed representation of Gaussian baselines?
+\item Does the extended critical regime provided by heavy-tailed initialization offer measurable advantages in low-data (few-shot) scenarios by preserving high-variance initial features?
+\item Does the structural redundancy found in the spectral bulk of heavy-tailed initializations mitigate catastrophic forgetting by providing a more resilient basis for sequential task adaptation?
+\end{itemize}
+\pagebreak
+\section{Methodology and Equipment}
+\begin{itemize}
+\item \textbf{Frameworks and Architectures:} Using Python and PyTorch, the project focuses on Multilayer Perceptrons (MLP) to isolate spectral dynamics and the transition between lazy and rich learning regimes. Scope exists to extend these findings to Convolutional Neural Networks (CNNs) to test the spatial generality of heavy-tailed initializations.
+\item \textbf{Benchmarks and Datasets:} MNIST serves as the primary baseline, with plans to scale to CIFAR-10 and ImageNet to verify findings in higher-dimensional spaces. Specialized datasets like Omniglot will be used to investigate the specific advantages of heavy-tailed priors in few-shot learning.
+\item \textbf{Theoretical Foundation and Methods:} Analysis is grounded in Random Matrix Theory (RMT) and Mean Field Theory (MFT), utilizing the Marchenko-Pastur Law to identify signal-to-noise thresholds and Neural Tangent Kernel (NTK) frameworks to define learning regime boundaries.
+\item \textbf{Computational Resources:} Prototyping and small-scale testing will utilize a local workstation (RTX 4080, i7-13700K), while production-level sweeps and multi-seed statistical analyses will be offloaded to the Physics Cluster via PBS-managed HPC queues.
+\end{itemize}
+\section{Proposed Timeline}
+\begin{table}[h!]
+\centering
+\small
+\begin{tabularx}{\textwidth}{@{} l l X @{}}
+\toprule
+\textbf{Period} & \textbf{Phase} & \textbf{Key Milestones and Deliverables} \\ \midrule
+Sem 1, Wk 1--3 & Foundation & Literature review initiation; repository architecture setup; codebase modularization. \\ \addlinespace
+Sem 1, Wk 4--10 & Exploration & Prototyping and preliminary spectral analysis; identifying key dynamical signatures and learning regimes. \\ \addlinespace
+Sem 1, Wk 11--13 & Production & Setting up PBS/HPC scripts; executing initial parameter sweeps for baseline verification. \\ \addlinespace
+Mid-Year Break & HPC Sweeps & Large-scale cluster execution; data consolidation; generation of high-resolution figures. \\ \addlinespace
+Sem 2, Wk 1--4 & Synthesis & Submission of Intro/Lit Review drafts; initial drafting of Methodology and Results sections. \\ \addlinespace
+Sem 2, Wk 5--9 & Refinement & Recursive experiment validation; thesis draft assembly; project presentation preparation. \\ \addlinespace
+Sem 2, Wk 10--13 & Finalization & Thesis polishing and formatting; final small-scale data gathering; oral exam preparation. \\ \bottomrule
+\end{tabularx}
+\caption{Proposed research timeline across the two-semester Honours project.}
+\end{table}
+\section{Data Retention Plan}
+\begin{itemize}
+\item \textbf{Data Retention:} To ensure long-term reproducibility, all experimental metadata, including source code, YAML configuration files, JSON logs, and model checkpoints, will be archived in a structured GitHub repository. This allows for exact reconstruction of any training run.
+\item \textbf{Feasibility:} Pilot studies have successfully identified measurable spectral differences between heavy-tailed and Gaussian regimes, confirming the project's viability. The supervisor Prof.\;Pulin Gong confirms availability for weekly consultations and access to the required HPC resources.
+\end{itemize}
+\end{document}
