@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import json
 import sys
+import itertools
 from datetime import datetime
 from scipy.stats import levy_stable
 from torchinfo import summary
@@ -65,6 +66,13 @@ def train_model_ht(model_input, ht_config, model_params, optim_class, optim_para
     """
     Foundational orchestrator to initialize, train, and log an ML experiment.
     """
+
+    def save_half_precision(state_dict, path):
+        """Helper to cast weights to bfp16 before saving to disk."""
+        half_state = {k: v.to(torch.bfloat16) if torch.is_floating_point(v) else v
+                      for k, v in state_dict.items()}
+        torch.save(half_state, path)
+
     # Store the original terminal handle
     original_stdout = sys.stdout
     logger = None
@@ -126,7 +134,7 @@ def train_model_ht(model_input, ht_config, model_params, optim_class, optim_para
         if hyperparams.get('save_weights_history', False):
             checkpoint_dir = run_dir / "checkpoints"
             checkpoint_dir.mkdir(exist_ok=True)
-            torch.save(model.state_dict(), checkpoint_dir / f"weights_epoch_0.pth")
+            save_half_precision(model.state_dict(), checkpoint_dir / f"weights_epoch_0.pth")
 
         # 6. Training Loop Logic
         criterion = nn.CrossEntropyLoss()
@@ -187,7 +195,7 @@ def train_model_ht(model_input, ht_config, model_params, optim_class, optim_para
                     if hyperparams.get('save_weights_history', False):
                         checkpoint_dir = run_dir / "checkpoints"
                         checkpoint_dir.mkdir(exist_ok=True)
-                        torch.save(model.state_dict(), checkpoint_dir / f"weights_epoch_{epoch}.pth")
+                        save_half_precision(model.state_dict(), checkpoint_dir / f"weights_epoch_{epoch}.pth")
 
         # 8. Final Artifact Export
         pd.DataFrame(history).to_csv(run_dir / "train_log.csv", index=False)
@@ -233,13 +241,15 @@ def train_model_ht(model_input, ht_config, model_params, optim_class, optim_para
             logger.close()
         print(f"--- Run Complete. Console logging detached ---")
 
-if __name__ == "__main__":
+def run_experiment_suite(config_path="config.yaml", num_seeds=1):
+    """
+    Executes a paired experiment sweep: Heavy-Tailed vs. Gaussian Baseline.
+
+    Args:
+        config_path (str/Path): Path to the master YAML configuration.
+        num_seeds (int): Number of consecutive seeds to run in the sweep.
+    """
     # 1. Load Master Configuration
-    # Check if a config file was passed via CLI
-    if len(sys.argv) > 1:
-        config_path = sys.argv[1]
-    else:
-        config_path = "config.yaml"
     cfg = load_master_config(config_path)
     data_cfg = cfg['data_config']
     base_output = cfg['full_config']['experiment_metadata']['output_root']
@@ -248,22 +258,26 @@ if __name__ == "__main__":
     dataset_class = get_dataset_class(data_cfg['dataset_name'])
     data_cfg['transform'] = get_transform(data_cfg.get('transforms', []))
 
-    # 3. Setup Data Loaders and Raw Dataset for Prototypical Eval
+    # 3. Setup Data Loaders
     is_omniglot = "Omniglot" in data_cfg['dataset_name']
     train_key = 'background' if is_omniglot else 'train'
 
-    # We capture the raw test dataset to pass into the loaders dict
-    test_ds = dataset_class(root='./data', **{train_key: False}, download=True, transform=data_cfg['transform'])
+    test_ds = dataset_class(
+        root='./data',
+        **{train_key: False},
+        download=True,
+        transform=data_cfg['transform']
+    )
 
     loaders = {
         'train': get_universal_loader(dataset_class, data_cfg, **{train_key: True}, download=True, root='./data'),
         'test': get_universal_loader(dataset_class, data_cfg, **{train_key: False}, download=True, root='./data'),
-        'test_dataset': test_ds  # Required for Prototypical Evaluation hook
+        'test_dataset': test_ds
     }
 
-    # 4. Five-Seed Sweep
+    # 4. Multi-Seed Sweep Execution
     starting_seed = cfg['full_config']['hyperparams'].get('seed', 0)
-    seeds = range(starting_seed, starting_seed + 1)
+    seeds = range(starting_seed, starting_seed + num_seeds)
     ht_config = cfg['full_config'].get('heavy_tail', {})
 
     for s in seeds:
@@ -271,7 +285,6 @@ if __name__ == "__main__":
 
         # --- RUN A: HEAVY-TAILED EXPERIMENT ---
         print(f"Running HT Experiment (alpha={ht_config['alpha']})...")
-
         train_model_ht(
             model_input=cfg['model_class'],
             ht_config=ht_config,
@@ -288,7 +301,6 @@ if __name__ == "__main__":
 
         # --- RUN B: GAUSSIAN BASELINE (alpha=2.0) ---
         print(f"Running Gaussian Baseline (alpha=2.0)...")
-        # Reuse the same g but force alpha to 2.0
         gauss_config = ht_config.copy()
         gauss_config['alpha'] = 2.0
 
@@ -305,3 +317,81 @@ if __name__ == "__main__":
             output_root=f"{base_output}/Gaussian_Baseline",
             log_freq=cfg['hyperparams'].get('log_freq', 10)
         )
+
+def run_parameter_grid_sweep(config_path="sweep_config.yaml", num_seeds=1):
+    """
+    Iterates through a grid of alpha and g values across multiple seeds.
+    Saves results into structured subfolders: output_root/alpha_g/seed_k/
+    """
+    # 1. Load Configuration and Setup Environment
+    cfg = load_master_config(config_path)
+    data_cfg = cfg['data_config']
+    base_output = Path(cfg['full_config']['experiment_metadata']['output_root'])
+
+    # Resolve Dataset and Loader Logic
+    dataset_class = get_dataset_class(data_cfg['dataset_name'])
+    data_cfg['transform'] = get_transform(data_cfg.get('transforms', []))
+
+    is_omniglot = "Omniglot" in data_cfg['dataset_name']
+    train_key = 'background' if is_omniglot else 'train'
+
+    loaders = {
+        'train': get_universal_loader(dataset_class, data_cfg, **{train_key: True}, download=True, root='./data'),
+        'test': get_universal_loader(dataset_class, data_cfg, **{train_key: False}, download=True, root='./data'),
+        'test_dataset': dataset_class(root='./data', **{train_key: False}, download=True, transform=data_cfg['transform'])
+    }
+
+    # 2. Extract Sweep Parameters from YAML
+    ht_settings = cfg['full_config'].get('heavy_tail', {})
+    alpha_list = ht_settings.get('alpha', [2.0])
+    g_list = ht_settings.get('g', [1.0])
+
+    # Standardize to lists for iteration
+    if not isinstance(alpha_list, list): alpha_list = [alpha_list]
+    if not isinstance(g_list, list): g_list = [g_list]
+
+    starting_seed = cfg['full_config']['hyperparams'].get('seed', 0)
+    seeds = range(starting_seed, starting_seed + num_seeds)
+
+    # 3. Execution: Seed -> (Alpha, G) Grid
+    sweep_grid = list(itertools.product(alpha_list, g_list))
+    print(f"Total Sweep Load: {num_seeds} seeds * {len(sweep_grid)} pairs = {num_seeds * len(sweep_grid)} runs.")
+
+    for s in seeds:
+        print(f"\n{'='*20}\nSTARTING SEED: {s}\n{'='*20}")
+
+        for alpha, g in sweep_grid:
+            run_label = f"alpha_{alpha}_g_{g}"
+            output_dir = base_output / run_label
+
+            print(f"\n>>> Running: {run_label} | Seed: {s}")
+
+            current_ht_config = ht_settings.copy()
+            current_ht_config['alpha'] = alpha
+            current_ht_config['g'] = g
+
+            # Execute training using the verified library wrapper
+            train_model_ht(
+                model_input=cfg['model_class'],
+                ht_config=current_ht_config,
+                model_params=cfg['model_params'],
+                optim_class=cfg['optim_class'],
+                optim_params=cfg['optim_params'],
+                hyperparams=cfg['hyperparams'],
+                data_config=cfg['data_config'],
+                loaders=loaders,
+                seed=s,
+                output_root=str(output_dir),
+                log_freq=cfg['hyperparams'].get('log_freq', 10)
+            )
+
+    print(f"\nUniversality sweep complete. Results archived in: {base_output}")
+
+if __name__ == "__main__":
+    # 1. Load Master Configuration
+    # Check if a config file was passed via CLI
+    if len(sys.argv) > 1:
+        config_path = sys.argv[1]
+    else:
+        config_path = "config.yaml"
+    run_parameter_grid_sweep(config_path, num_seeds=5)
