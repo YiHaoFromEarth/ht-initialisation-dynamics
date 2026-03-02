@@ -1,0 +1,18 @@
+Logging initialized in: mlp_sweep/alpha_1.9_g_1.25/GeneralMLP_LR0.001_BS128_20260301_134923_s3
+Overwriting weights with Heavy-Tailed Distribution (α=1.9, g=1.25)
+Applying HT Init: alpha=1.9, g=1.25, seed=3
+Epoch 10 | Train Acc: 0.9485 | Test Acc: 0.9438
+Epoch 20 | Train Acc: 0.9655 | Test Acc: 0.9567
+Epoch 30 | Train Acc: 0.9749 | Test Acc: 0.9625
+Epoch 40 | Train Acc: 0.9805 | Test Acc: 0.9667
+Epoch 50 | Train Acc: 0.9852 | Test Acc: 0.9693
+Epoch 60 | Train Acc: 0.9885 | Test Acc: 0.9712
+Epoch 70 | Train Acc: 0.9910 | Test Acc: 0.9725
+Epoch 80 | Train Acc: 0.9931 | Test Acc: 0.9737
+Epoch 90 | Train Acc: 0.9947 | Test Acc: 0.9741
+Epoch 100 | Train Acc: 0.9958 | Test Acc: 0.9750
+Epoch 110 | Train Acc: 0.9967 | Test Acc: 0.9753
+Epoch 120 | Train Acc: 0.9976 | Test Acc: 0.9761
+Epoch 130 | Train Acc: 0.9982 | Test Acc: 0.9760
+Epoch 140 | Train Acc: 0.9987 | Test Acc: 0.9759
+Epoch 150 | Train Acc: 0.9991 | Test Acc: 0.9762
