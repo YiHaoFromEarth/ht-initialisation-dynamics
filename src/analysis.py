@@ -69,12 +69,32 @@ def get_layer_fingerprint(W_init, W_final):
     # Measures how 'flat' the eigenvalue distribution is
     part_ratio = (torch.sum(S_t)**2) / (len(S_t) * torch.sum(S_t**2))
 
+    # Get singular values
+    s = torch.linalg.svdvals(W_t.detach().float())
+    s2 = s**2
+    p = s2 / s2.sum() # Normalized power
+
+    # 1. Hill Estimator (Simplified)
+    # We look at the top 10% of singular values to estimate the tail
+    k = max(int(len(s) * 0.1), 5)
+    s_top = s[:k]
+    hill = 1.0 / (torch.log(s_top / s_top[-1]).mean())
+
+    # 2. Raw Spectral Entropy
+    entropy = -torch.sum(p * torch.log(p + 1e-10))
+
+    # 3. Dominance Ratio
+    dominance = s[0] / s.sum()
+
     return {
         'displacement': displacement.item(),
         'effective_rank': eff_rank.item(),
         'ipr': ipr.item(),
         'participation_ratio': part_ratio.item(),
-        'max_singular_val': S_t[0].item()
+        'max_singular_val': S_t[0].item(),
+        'hill_alpha': hill.item(),
+        'spectral_entropy': entropy.item(),
+        'dominance_ratio': dominance.item(),
     }
 
 def get_layer_from_checkpoint(model_path, layer_key):
