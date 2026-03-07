@@ -1,0 +1,47 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage[left=2cm,right=2cm,top=2cm,bottom=2cm]{geometry}
+\author{Yi Hao \vspace{0.35cm} \\ Supervisor: Prof.\;Pulin Gong}
+\title{\textbf{Honours Project Data Management Plan} \\[1.5ex] Exploring Extended Criticality in Heavy-Tailed Neural Networks}
+\newcommand*{\SignatureAndDate}[1]{%
+    \par\noindent\makebox[2.5in]{\hrulefill} \hfill\makebox[2.0in]{\hrulefill}%
+    \par\noindent\makebox[2.5in][l]{#1}      \hfill\makebox[2.0in][l]{Date}%
+}%
+\newcommand*{\Signature}[1]{%
+
+\vspace{1cm}
+    \par\noindent\makebox[2.5in]{\hrulefill}% \hfill\makebox[2.0in]{\hrulefill}%
+    \par\noindent\makebox[2.5in][l]{#1}     % \hfill\makebox[2.0in][l]{Date}%
+}%
+\begin{document}
+\maketitle
+\subsection*{Relevant Data}
+The research generates and analyses three primary data streams derived from neural network training sweeps: model checkpoints, training logs, and configuration metadata.
+\begin{itemize}
+\item Model Checkpoints: Weight tensors are stored as PyTorch files (\texttt{.pth}), including both intermediate snapshots and final trained states.
+\item Training Logs: Performance metrics are captured in \texttt{train\_log.csv}, tracking training/testing loss and accuracy across all epochs.
+\item Metadata \& Environment: Each run is documented via \texttt{architecture.txt} (structural summary), \texttt{console\_output.txt} (execution logs), and \texttt{run\_config.json}, which preserves the exact hyper-parameters, seeds, and data transformations used for that specific instance.
+\end{itemize}
+No sensitive or personal data is involved; all datasets are synthetic and strictly related to model architecture and optimization.
+\subsection*{Data Storage and Backup}
+The primary working directory is maintained on a local workstation, with high-volume weight checkpoints stored locally due to their size. For large-scale parameter sweeps, high-performance computing (HPC) clusters are utilized. During cluster execution, data is temporarily staged on the cluster's high-speed project storage. Once runs are complete, the resulting \texttt{train\_log.csv}, \texttt{run\_config.json}, and associated checkpoints are synced to the local machine for post-processing and spectral analysis.\vspace{0.4cm}
+Comprehensive backups and versioning are handled through a dedicated GitHub repository, which tracks all source code, analysis scripts, training logs, and metadata files. This ensures that while the heavy model weights remain on local storage, the entire logic and history of the project, including every \texttt{train\_log.csv} and \texttt{run\_config.json}, is redundant and globally accessible via Git.
+\subsection*{Data Retention}
+Reproducibility is anchored by the GitHub repository, which contains the complete lineage of the project. By retaining the \texttt{run\_config.json} alongside the analysis notebooks and environment specifications, any run can be perfectly reconstructed from its original seed. Post-project, the repository will remain the permanent archive for the documentation and performance data, ensuring that the research can be audited or extended without the need to store massive, redundant checkpoint files.
+
+\newpage
+\subsection*{Declaration of Conditions \& Availability}
+To the best of the knowledge of the Principal Supervisor, all of the data, computer programs, equipment, observing time and other essential resources are available, or can reasonably be built, acquired or written during the project. Apart from brief absences, proper supervision will be available throughout the project period from either the Principal Supervisor or the Associate Supervisor(s). External researchers may only fulfill the role of Associate Supervisor.
+
+
+\Signature{Student}
+
+\Signature{Principal Supervisor}
+\end{document}
+\end{document}
