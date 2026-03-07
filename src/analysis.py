@@ -2,39 +2,126 @@ import torch
 import numpy as np
 import copy
 from pathlib import Path
+from scipy.optimize import curve_fit
 from .ml_library import load_master_config, get_dataset_class, get_transform, get_universal_loader, model_factory
 
 def get_singular_values(matrix):
     """
-    Extracts singular values and converts to normalized squared eigenvalues
-    for RMT analysis (λ = s^2 / M).
+    Extracts singular values from a matrix.
     """
     if isinstance(matrix, np.ndarray):
         matrix = torch.from_numpy(matrix)
 
-    # Use SVD values for numerical stability
-    N, M = matrix.shape
+    # Paper analyzes singular values directly
     s = torch.linalg.svdvals(matrix.float())
-    # RMT usually analyzes the eigenvalues of the covariance matrix WW^T
-    eigenvalues = s**2 / M  # Normalize by M for RMT scaling
-    return eigenvalues.detach().cpu().numpy()
+    return s.detach().cpu().numpy()
 
-def marchenko_pastur_pdf(x, Q, sigma=1.0):
+def extract_rmt_parameters(matrix):
     """
-    Theoretical Marchenko-Pastur Density.
-    Q = N/M (Aspect ratio)
-    sigma = variance of the entries
-    """
-    # Boundary points of the MP distribution
-    lambda_plus = (sigma**2) * (1 + np.sqrt(Q))**2
-    lambda_minus = (sigma**2) * (1 - np.sqrt(Q))**2
+    Extracts the dimensions (n, m) and the empirical rescaled
+    variance (sigma_tilde) for Marchenko-Pastur fitting.
 
-    # PDF Calculation
-    with np.errstate(divide='ignore', invalid='ignore'):
-        pdf = (1/(2 * np.pi * sigma**2 * Q * x)) * np.sqrt(
-            np.maximum(0, (lambda_plus - x) * (x - lambda_minus))
+    Args:
+        matrix: torch.Tensor or np.ndarray of shape (rows, cols)
+
+    Returns:
+        n (int): Larger dimension
+        m (int): Smaller dimension
+        sigma_tilde (float): Empirical variance parameter (sigma * sqrt(n))
+    """
+    # 1. Dimensions: Paper assumes m <= n
+    shape = matrix.shape
+    n = max(shape)
+    m = min(shape)
+
+    # 2. Empirical Sigma Tilde:
+    # The paper uses sigma as the variance of matrix entries[cite: 76, 83].
+    # In practice, we calculate it from the weights of the current layer.
+    if isinstance(matrix, torch.Tensor):
+        sigma_empirical = torch.std(matrix).item()
+    else:
+        sigma_empirical = np.std(matrix)
+
+    # Per Eq (4), sigma_tilde = sigma * sqrt(n)
+    sigma_tilde = sigma_empirical * np.sqrt(n)
+
+    return n, m, sigma_tilde
+
+def fit_mp_to_density(x_range, empirical_pdf, nu_raw):
+    """
+    Fits the modified MP law to the broadened empirical density
+    to resolve the bulk boundary (nu_max).
+    """
+    # 1. Fixed Anchors
+    nu_min = np.min(nu_raw) # [cite: 124]
+    n, m, sigma_init = extract_rmt_parameters(nu_raw)
+    Q = n / m
+
+    # 2. Optimization Wrapper
+    def mp_wrapper(x, v_max, s_tilde):
+        # Faithful Eq (4) implementation [cite: 78-83]
+        with np.errstate(divide='ignore', invalid='ignore'):
+            term1 = Q / (np.pi * (s_tilde**2) * x)
+            term2 = np.sqrt(np.maximum(0, (v_max**2 - x**2) * (x**2 - nu_min**2)))
+            return np.nan_to_num(term1 * term2)
+
+    # 3. Initial Guesses [cite: 83]
+    v_max_guess = sigma_init * (1 + np.sqrt(1/Q))
+    p0 = [v_max_guess, sigma_init]
+
+    # 4. Fitting against the BROADENED density
+    # We restrict the fit to the bulk region (x < v_max_guess * 1.1)
+    # so the outliers in the tail don't pull the bulk fit off-center.
+    fit_mask = x_range < (v_max_guess * 1.1)
+
+    try:
+        popt, _ = curve_fit(
+            mp_wrapper,
+            x_range[fit_mask],
+            empirical_pdf[fit_mask],
+            p0=p0,
+            bounds=([nu_min + 1e-5, 1e-5], [np.inf, np.inf])
         )
-    return np.nan_to_num(pdf), lambda_minus, lambda_plus
+        v_max_fit, s_tilde_fit = popt
+    except RuntimeError:
+        # Fallback to theory if optimization fails
+        v_max_fit, s_tilde_fit = v_max_guess, sigma_init
+
+    return v_max_fit, s_tilde_fit
+
+def gaussian_broadening(nu, x_range, a=15):
+    """
+    Computes the smoothed PDF of singular values using adaptive
+    Gaussian broadening per Equation (7) of the paper.
+
+    Args:
+        nu (array): The raw singular values extracted from the layer.
+        x_range (array): The x-axis points where you want to evaluate the PDF.
+        a (int): The window size for adaptive smoothing (paper uses 15).
+    """
+    # 1. Sort singular values (nu) in ascending order for neighbor calculation
+    nu_sorted = np.sort(nu)
+    m = len(nu_sorted)
+
+    # 2. Calculate Adaptive Widths (sigma_k)
+    # sigma_k = (nu_{k+a} - nu_{k-a}) / 2
+    # We pad the array to handle the boundaries (0 and m-1)
+    padded_nu = np.pad(nu_sorted, (a, a), mode='edge')
+    sigmas = (padded_nu[2*a:] - padded_nu[:m]) / 2.0
+
+    # Ensure no zero-width sigmas to avoid division by zero
+    sigmas = np.maximum(sigmas, 1e-6)
+
+    # 3. Compute PDF: Average of Gaussian kernels
+    pdf = np.zeros_like(x_range)
+    for k in range(m):
+        # Calculate Gaussian centered at nu_k with width sigma_k
+        diff = x_range - nu_sorted[k]
+        kernel = (1.0 / (np.sqrt(2 * np.pi) * sigmas[k])) * \
+                 np.exp(-0.5 * (diff / sigmas[k])**2)
+        pdf += kernel
+
+    return pdf / m
 
 def get_layer_fingerprint(W_init, W_final):
     """

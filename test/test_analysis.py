@@ -4,9 +4,18 @@ import numpy as np
 import pytest
 import os
 import yaml
-from src import get_singular_values, marchenko_pastur_pdf, get_layer_fingerprint, evaluate_spectral_perturbation, get_layer_from_checkpoint, run_spectral_analysis
 from torch.utils.data import DataLoader, TensorDataset
 from pathlib import Path
+from src import (
+    get_singular_values,
+    extract_rmt_parameters,
+    gaussian_broadening,
+    fit_mp_to_density,
+    get_layer_fingerprint,
+    evaluate_spectral_perturbation,
+    get_layer_from_checkpoint,
+    run_spectral_analysis
+)
 
 # --- 1. A Minimal Model for Testing ---
 class ToyLinear(nn.Module):
@@ -21,55 +30,98 @@ class ToyLinear(nn.Module):
         return self.fc(x)
 
 def test_singular_values_identity():
-    """Verify singular values for a known matrix (Identity)."""
-    # For an IxI identity matrix, all singular values are 1, so all eigenvalues (s^2) are 1 / M.
+    """
+    Verify raw singular values (nu) for an Identity matrix.
+    Per PhysRevE 106 054124, we analyze nu directly, not s^2/M.
+    """
     size = 100
     identity = torch.eye(size)
-    evs = get_singular_values(identity)
 
-    assert np.allclose(evs, 1.0 / size), f"Eigenvalues of Identity matrix should all be 1/{size}"
-    assert len(evs) == size
+    # Extract nu using the updated function
+    nu = get_singular_values(identity)
 
-def test_singular_values_scaling():
-    """Verify that scaling the matrix scales the eigenvalues by the square."""
-    matrix = torch.randn(50, 50)
-    evs_1 = get_singular_values(matrix)
-    evs_2 = get_singular_values(matrix * 2.0)
+    # 1. Identity singular values are exactly 1.0
+    assert np.allclose(nu, 1.0), "Singular values of Identity should be 1.0"
 
-    # (2W)(2W)^T = 4(WW^T) -> eigenvalues should be 4x larger
-    assert np.allclose(evs_2, evs_1 * 4.0)
+    # 2. Dimensions must match the smaller axis (m)
+    assert len(nu) == size, f"Expected {size} singular values"
 
-def test_marchenko_pastur_integration():
-    """Verify the MP PDF integrates to (approximately) 1.0."""
-    Q = 0.5
-    sigma = 1.0
-    x_range = np.linspace(0.001, 5.0, 10000)
-    pdf, l_min, l_max = marchenko_pastur_pdf(x_range, Q, sigma)
-
-    # Numerical integration using trapezoidal rule
-    area = np.trapezoid(pdf, x_range)
-    assert np.isclose(area, 1.0, atol=1e-2), f"MP PDF area should be 1.0, got {area}"
-
-def test_rmt_convergence():
+def test_extract_rmt_parameters_toy():
     """
-    Physical Unit Test: Does a large Gaussian matrix match the MP curve?
-    This bridges the gap between your code and RMT theory.
+    Verify extraction of n, m, and sigma_tilde from a controlled toy matrix.
     """
-    N, M = 1000, 2000 # Q = 0.5
-    Q = N / M
-    # Standard Gaussian entries with variance 1/M
-    sigma = 1 / np.sqrt(M)
-    matrix = torch.randn(N, M) * sigma
+    # Create a 200x100 matrix for clear n, m distinction
+    # Using a constant value to make variance calculation predictable
+    # Var(0.1) = 0.0, so we add a bit of noise
+    n_true, m_true = 200, 100
+    toy_matrix = torch.randn(n_true, m_true) * 0.05
 
-    evs = get_singular_values(matrix)
+    n, m, sigma_tilde = extract_rmt_parameters(toy_matrix)
 
-    # Check if the largest eigenvalue is near the theoretical Bulk Edge (lambda_plus)
-    # lambda_plus = sigma^2 * (1 + sqrt(Q))^2
-    lambda_plus_theory = (sigma**2) * (1 + np.sqrt(Q))**2
+    # 1. Check Dimensions (n is max, m is min)
+    assert n == n_true, f"Expected n={n_true}, got {n}"
+    assert m == m_true, f"Expected m={m_true}, got {m}"
 
-    # We allow a small margin for the Tracy-Widom fluctuation at the edge
-    assert np.max(evs) < lambda_plus_theory * 1.2, "Largest eigenvalue significantly exceeded MP bulk"
-    assert np.mean(evs) == pytest.approx(sigma**2, rel=0.1), "Mean eigenvalue should match entry variance"
+    # 2. Check Sigma Tilde Scaling
+    # sigma_tilde = std(W) * sqrt(n)
+    expected_std = toy_matrix.std().item()
+    expected_sigma_tilde = expected_std * np.sqrt(n_true)
+
+    assert np.isclose(sigma_tilde, expected_sigma_tilde), \
+        f"Sigma_tilde {sigma_tilde} does not match expected {expected_sigma_tilde}"
+
+def test_gaussian_broadening_sum():
+    """
+    Verify that the broadened PDF integrates approximately to 1.
+    """
+    nu = np.random.normal(loc=1.0, scale=0.1, size=100)
+    x_range = np.linspace(0, 2, 1000)
+    dx = x_range[1] - x_range[0]
+
+    pdf = gaussian_broadening(nu, x_range, a=5)
+    total_area = np.trapz(pdf, x_range)
+
+    # Area should be close to 1.0 (probability distribution) [cite: 227]
+    assert np.isclose(total_area, 1.0, atol=1e-2), f"PDF area is {total_area}, expected 1.0"
+
+def test_mp_fitting_and_outlier_detection():
+    """
+    Verify that the solver recovers the correct nu_max and identifies
+    injected outliers (learned signal).
+    """
+    # 1. Setup Synthetic Bulk (N=1000, M=500, sigma_tilde=1.5)
+    n, m = 1000, 500
+    sigma_tilde_true = 1.5
+    Q = n / m
+    nu_min_theory = sigma_tilde_true * (1 - np.sqrt(1/Q))
+    nu_max_theory = sigma_tilde_true * (1 + np.sqrt(1/Q))
+
+    # Generate random bulk + 5 clear outliers
+    bulk = np.random.uniform(nu_min_theory, nu_max_theory, 995)
+    outliers = np.array([nu_max_theory + 2.0, nu_max_theory + 3.0,
+                         nu_max_theory + 4.0, nu_max_theory + 5.0,
+                         nu_max_theory + 6.0])
+    nu_synthetic = np.concatenate([bulk, outliers])
+
+    # 2. Broaden the spectrum to create the fitting target
+    x_range = np.linspace(0, nu_synthetic.max() + 1, 2000)
+    empirical_pdf = gaussian_broadening(nu_synthetic, x_range, a=15)
+
+    # 3. Solve for RMT Parameters
+    v_max_fit, s_tilde_fit = fit_mp_to_density(x_range, empirical_pdf, nu_synthetic)
+
+    # 4. Assertions
+    # The fitted nu_max should be close to the theoretical boundary
+    assert np.isclose(v_max_fit, nu_max_theory, atol=0.2), \
+        f"Fitted nu_max {v_max_fit} deviated too far from theory {nu_max_theory}"
+
+    # Count outliers beyond the fitted bulk
+    detected_outliers = np.sum(nu_synthetic > v_max_fit)
+
+    # We expect to find at least our 5 injected outliers
+    # (Some high-end bulk values might occasionally drift over)
+    assert detected_outliers >= 5, f"Failed to detect all 5 outliers, found {detected_outliers}"
+    print(f"Success: Detected {detected_outliers} singular values as 'Learned Information'")
 
 def test_fingerprint_logic():
     # --- 1. Define Toy Matrices ---
