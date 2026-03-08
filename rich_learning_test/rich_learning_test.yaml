@@ -1,0 +1,49 @@
+experiment_metadata:
+  name: "MLP_RICH_LEARNING"
+  output_root: "./rich_learning_test"
+  comment: >
+    Hypothesis is that the current setup is too easy for the model to learn, hence near minimal changes observed
+    The test accurary often reaches 0.90 by Epoch 10, and then the model is just fine-tuning the weights to reach 0.98 by Epoch 150.
+    To make the learning more difficult, we will increase the depth of the MLP to 10 layers in total
+    Increasing the batch size to 1024 to make learning slower
+
+model:
+  class_name: "GeneralMLP"
+  params:
+    kwargs:
+      input_size: 3072
+      hidden_size: 512
+      num_classes: 10
+      depth: 3
+      activation_name: "relu"
+      bias: False
+
+optimizer:
+  class_name: "SGD"
+  params:
+    lr: 0.001
+    momentum: 0.95
+    weight_decay: 0.0
+
+data:
+  dataset_name: "CIFAR10"
+  batch_size: 32
+  use_gpu: true
+  fast_load: true
+  transforms:
+    - ToTensor: null
+    - Normalize:
+        mean: [0.4914, 0.4822, 0.4465]
+        std: [0.2470, 0.2435, 0.2616]
+
+heavy_tail:
+  enabled: true
+  alpha: 2.0
+  g: 1.0
+
+hyperparams:
+  epochs: 100
+  seed: 0
+  log_freq: 10
+  device: "cuda"
+  save_weights_history: true

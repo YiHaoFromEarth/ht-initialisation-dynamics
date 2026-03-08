@@ -126,8 +126,22 @@ def train_model_ht(model_input, ht_config, model_params, optim_class, optim_para
 
         # 5. Architecture Documentation
         with open(run_dir / "architecture.txt", "w") as f:
-            # Assumes MNIST/Omniglot-style 1-channel input
-            stats = summary(model, input_size=(data_config['batch_size'], 1, 28, 28), verbose=0)
+            # Dynamically infer input shape from the data loader
+            # This prevents hard-coding (1, 28, 28) for MNIST vs (3, 32, 32) for CIFAR-10
+            try:
+                # Get one batch from the training loader
+                example_data, _ = next(iter(loaders['train']))
+                # Extract shape: (BatchSize, Channels, Height, Width)
+                input_shape = example_data.shape
+            except (KeyError, StopIteration):
+                # Fallback to config if loader is unavailable
+                # Assumes 3072 for CIFAR-10 flattened or (3, 32, 32)
+                batch_size = data_config.get('batch_size', 32)
+                if data_config.get('dataset_name') == "CIFAR-10":
+                    input_shape = (batch_size, 3, 32, 32)
+                else:
+                    input_shape = (batch_size, 1, 28, 28)
+            stats = summary(model, input_size=input_shape, verbose=0)
             f.write(str(stats))
 
         # 5.1. Initial Weight Snapshot
@@ -243,7 +257,7 @@ def train_model_ht(model_input, ht_config, model_params, optim_class, optim_para
 
 def run_experiment_suite(config_path="config.yaml", num_seeds=1):
     """
-    Executes a paired experiment sweep: Heavy-Tailed vs. Gaussian Baseline.
+    Executes an experiment sweep by reading a config file.
 
     Args:
         config_path (str/Path): Path to the master YAML configuration.
@@ -296,25 +310,6 @@ def run_experiment_suite(config_path="config.yaml", num_seeds=1):
             loaders=loaders,
             seed=s,
             output_root=f"{base_output}/HT_alpha_{ht_config['alpha']}",
-            log_freq=cfg['hyperparams'].get('log_freq', 10)
-        )
-
-        # --- RUN B: GAUSSIAN BASELINE (alpha=2.0) ---
-        print(f"Running Gaussian Baseline (alpha=2.0)...")
-        gauss_config = ht_config.copy()
-        gauss_config['alpha'] = 2.0
-
-        train_model_ht(
-            model_input=cfg['model_class'],
-            ht_config=gauss_config,
-            model_params=cfg['model_params'],
-            optim_class=cfg['optim_class'],
-            optim_params=cfg['optim_params'],
-            hyperparams=cfg['hyperparams'],
-            data_config=cfg['data_config'],
-            loaders=loaders,
-            seed=s,
-            output_root=f"{base_output}/Gaussian_Baseline",
             log_freq=cfg['hyperparams'].get('log_freq', 10)
         )
 
@@ -394,4 +389,4 @@ if __name__ == "__main__":
         config_path = sys.argv[1]
     else:
         config_path = "config.yaml"
-    run_parameter_grid_sweep(config_path, num_seeds=5)
+    run_experiment_suite(config_path, num_seeds=1)

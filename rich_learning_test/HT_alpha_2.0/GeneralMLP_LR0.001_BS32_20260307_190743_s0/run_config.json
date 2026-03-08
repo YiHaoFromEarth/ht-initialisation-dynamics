@@ -1,0 +1,53 @@
+{
+    "model": "GeneralMLP",
+    "model_params": {
+        "kwargs": {
+            "input_size": 3072,
+            "hidden_size": 512,
+            "num_classes": 10,
+            "depth": 3,
+            "activation_name": "relu",
+            "bias": false
+        }
+    },
+    "optimizer": "SGD",
+    "optimizer_params": {
+        "lr": 0.001,
+        "momentum": 0.95,
+        "weight_decay": 0.0
+    },
+    "hyperparams": {
+        "epochs": 100,
+        "seed": 0,
+        "log_freq": 10,
+        "device": "cuda",
+        "save_weights_history": true
+    },
+    "data_config": {
+        "dataset_name": "CIFAR10",
+        "batch_size": 32,
+        "use_gpu": true,
+        "fast_load": true,
+        "transforms": [
+            {
+                "ToTensor": null
+            },
+            {
+                "Normalize": {
+                    "mean": [
+                        0.4914,
+                        0.4822,
+                        0.4465
+                    ],
+                    "std": [
+                        0.247,
+                        0.2435,
+                        0.2616
+                    ]
+                }
+            }
+        ],
+        "transform": "Compose(\n    ToTensor()\n    Normalize(mean=[0.4914, 0.4822, 0.4465], std=[0.247, 0.2435, 0.2616])\n)"
+    },
+    "seed": 0
+}
