@@ -11,30 +11,32 @@ model:
   class_name: "GeneralMLP"
   params:
     kwargs:
-      input_size: 3072
-      hidden_size: 512
+      input_size: 784
+      hidden_size: 784
       num_classes: 10
-      depth: 3
-      activation_name: "relu"
+      depth: 9
+      activation_name: "tanh"
       bias: False
 
 optimizer:
   class_name: "SGD"
   params:
     lr: 0.001
-    momentum: 0.95
+    momentum: 0.0
     weight_decay: 0.0
 
 data:
-  dataset_name: "CIFAR10"
-  batch_size: 32
+  dataset_name: "MNIST"
+  batch_size: 1024
   use_gpu: true
   fast_load: true
   transforms:
     - ToTensor: null
     - Normalize:
-        mean: [0.4914, 0.4822, 0.4465]
-        std: [0.2470, 0.2435, 0.2616]
+        mean: [0.1307]
+        std: [0.3081]
+        # mean: [0.4914, 0.4822, 0.4465]
+        # std: [0.2470, 0.2435, 0.2616]
 
 heavy_tail:
   enabled: true
@@ -42,7 +44,7 @@ heavy_tail:
   g: 1.0
 
 hyperparams:
-  epochs: 100
+  epochs: 650
   seed: 0
   log_freq: 10
   device: "cuda"

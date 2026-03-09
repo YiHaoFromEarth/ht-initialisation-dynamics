@@ -215,6 +215,70 @@ def run_spectral_analysis(run_dir, config_path, layer_key, k_values, mode='ablat
 
     return results
 
+def calculate_true_mle(weights_list, input_sample, activation='relu', device='cpu'):
+    """
+    Calculates the True Maximal Lyapunov Exponent (MLE) by propagating a
+    perturbation through the Jacobian chain.
+
+    Args:
+        weights_list: List of torch.Tensors [W1, W2, ..., WL]
+        input_sample: A single input vector (shape [1, input_dim])
+        activation: 'relu', 'tanh', or 'sigmoid'
+    """
+    # 1. Initialize the perturbation vector q with unit norm
+    # This represents the initial direction of the perturbation
+    input_dim = weights_list[0].shape[1]
+    q = torch.randn(1, input_dim).to(device)
+    q = q / torch.norm(q)
+
+    # 2. Setup activation derivatives
+    def get_phi_prime(h, mode):
+        if mode == 'relu': return (h > 0).float()
+        if mode == 'tanh': return 1.0 - torch.tanh(h)**2
+        if mode == 'sigmoid':
+            s = torch.sigmoid(h)
+            return s * (1.0 - s)
+        return torch.ones_like(h)
+
+    total_log_expansion = 0.0
+    x = input_sample.to(device)
+    num_layers = len(weights_list)
+
+    with torch.no_grad():
+        for W in weights_list:
+            W = W.to(device)
+
+            # --- FORWARD PASS (State x) ---
+            h = torch.matmul(x, W.t())
+
+            # --- PERTURBATION PASS (Direction q) ---
+            # The Jacobian J = diag(phi'(h)) * W
+            # We find the new direction z = J * q
+            phi_prime = get_phi_prime(h, activation)
+
+            # This is the crucial part: z is the result of the perturbation
+            # being transformed by the layer weight and filtered by activation
+            z = phi_prime * torch.matmul(q, W.t())
+
+            # --- MEASURE & NORMALIZE (The QR step) ---
+            # The expansion factor at this layer is the norm of the new vector
+            expansion = torch.norm(z)
+
+            # Accumulate the log of the expansion
+            total_log_expansion += torch.log(expansion + 1e-10).item()
+
+            # Update q: Normalize the direction for the next layer
+            # This ensures we don't hit numerical 'inf' or '0'
+            q = z / (expansion + 1e-10)
+
+            # Update x for the next layer's pre-activations
+            if activation == 'relu': x = torch.relu(h)
+            elif activation == 'tanh': x = torch.tanh(h)
+            else: x = torch.sigmoid(h)
+
+    # Average log-expansion across the network depth
+    return total_log_expansion / num_layers
+
 """This section contains contains functions for random matrix theory (RMT) analysis. Adapted from 10.1103/PhysRevE.106.054124"""
 
 from typing import List, Tuple, Any, Union
