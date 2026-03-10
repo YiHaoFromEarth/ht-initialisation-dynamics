@@ -3,7 +3,7 @@ import numpy as np
 import copy
 from pathlib import Path
 from scipy.optimize import curve_fit
-from .ml_library import load_master_config, get_dataset_class, get_transform, get_universal_loader, model_factory
+from .utils import load_master_config, get_dataset_class, get_transform, get_universal_loader, model_factory
 
 def get_singular_values(matrix):
     """

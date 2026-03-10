@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 import torch.nn.functional as F
-from .ml_library import get_hooked_features
+from .utils import get_hooked_features
 
 @torch.no_grad()
 def evaluate_few_shot(model, hook_manager, dev, valid_ds, n_way=5, k_shot=5, n_episodes=500):

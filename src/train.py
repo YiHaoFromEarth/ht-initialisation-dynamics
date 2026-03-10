@@ -1,15 +1,13 @@
 import torch
 import torch.nn as nn
-import numpy as np
 import pandas as pd
 import json
 import sys
 import itertools
 from datetime import datetime
-from scipy.stats import levy_stable
 from torchinfo import summary
 from pathlib import Path
-from .ml_library import (
+from .utils import (
     model_factory,
     load_master_config,
     get_universal_loader,
@@ -20,46 +18,152 @@ from .ml_library import (
     TeeLogger,
 )
 
-def init_heavy_tailed(tensor, alpha, g, seed_offset=0, base_seed=0):
+def train_model(model_input, model_params, optim_class, optim_params,
+                hyperparams, data_config, loaders, seed, output_root, log_freq=10):
     """
-    Overwrites a tensor's data with heavy-tailed weights using per-layer seeds.
+    Foundational orchestrator to initialize, train, and log an ML experiment.
     """
-    with torch.no_grad():
-        # 1. Calculate the effective N based on tensor shape
-        if tensor.dim() == 4:  # Conv layer
-            n_eff = tensor.shape[1] * tensor.shape[2] * tensor.shape[3]
-        else:  # Linear layer
-            n_eff = (tensor.shape[0] * tensor.shape[1])**0.5
+    # Store the original terminal handle
+    original_stdout = sys.stdout
+    logger = None
 
-        # 2. Localized Seed: ensures unique outlier placement per layer
-        # This prevents correlated 'super-paths' through the network depth.
-        local_rng = np.random.RandomState(base_seed + seed_offset)
+    try:
+        # 1. Strict Determinism
+        set_seed(seed)
 
-        # 3. Generate stable samples with the local RNG
-        scale = g / (2 * n_eff)**(1/alpha)
-        samples = levy_stable.rvs(alpha, 0, scale=scale, size=tensor.shape, random_state=local_rng)
+        device = hyperparams.get('device', 'cpu')
 
-        # 4. Copy to PyTorch
-        tensor.copy_(torch.from_numpy(samples).float())
+        # 2. Flexible Model Acquisition
+        if isinstance(model_input, nn.Module):
+            # We were passed a pre-initialized model instance
+            model = model_input
+            model_name = model.__class__.__name__
+        else:
+            # Standard path: Initialize from class and params
+            m_args = model_params.get('args', [])
+            m_kwargs = model_params.get('kwargs', {})
+            model = model_factory(model_input, *m_args, **m_kwargs)
+            model_name = model_input.__name__
+        if model is None: return None # Graceful exit on init failure
+        model = model.to(device)
 
-def apply_heavy_tailed_init(model, alpha, g, base_seed=0):
-    """
-    Scans a model and applies HT initialization to all weight tensors.
-    """
-    print(f"Applying HT Init: alpha={alpha}, g={g}, seed={base_seed}")
-    with torch.no_grad():
-        # Dedicated counter ensures seed consistency across different model types
-        weight_idx = 0
-        for name, param in model.named_parameters():
-            if 'weight' in name and param.dim() >= 2:
-                # Use Fan-in (input dimension) for more stable HT scaling
-                # n_eff = param.shape[1]
-                init_heavy_tailed(param, alpha, g, seed_offset=weight_idx, base_seed=base_seed)
-                weight_idx += 1
-            elif 'bias' in name:
-                # Heavy tails work best when centered at zero
-                param.zero_()
-    return model
+        # 3. Directory and Metadata Setup
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        folder_name = f"{model_name}_LR{optim_params.get('lr', 'N/A')}_BS{data_config['batch_size']}_{timestamp}_s{seed}"
+        run_dir = Path(output_root) / folder_name
+        run_dir.mkdir(parents=True, exist_ok=True)
+
+        # Start logging console output to file
+        sys.stdout = TeeLogger(run_dir / "console_output.txt")
+        print(f"Logging initialized in: {run_dir}")
+
+        # 4. Optimizer Initialization (via Factory)
+        optimizer = optimizer_factory(optim_class, model.parameters(), **optim_params)
+        if optimizer is None: return None
+
+        # 5. Architecture Documentation
+        with open(run_dir / "architecture.txt", "w") as f:
+            # Assumes MNIST/Omniglot-style 1-channel input
+            stats = summary(model, input_size=(data_config['batch_size'], 1, 28, 28), verbose=0)
+            f.write(str(stats))
+
+        # 6. Training Loop Logic
+        criterion = nn.CrossEntropyLoss()
+        history = []
+
+        for epoch in range(1, hyperparams['epochs'] + 1):
+                model.train()
+                train_loss, train_correct, train_total = 0.0, 0, 0
+
+                # Training Phase
+                for inputs, labels in loaders['train']:
+                    inputs, labels = inputs.to(device), labels.to(device)
+
+                    optimizer.zero_grad()
+                    outputs = model(inputs)
+                    loss = criterion(outputs, labels)
+                    loss.backward()
+
+                    if 'grad_clip' in hyperparams:
+                        torch.nn.utils.clip_grad_norm_(model.parameters(), hyperparams['grad_clip'])
+
+                    optimizer.step()
+
+                    train_loss += loss.item()
+                    _, predicted = outputs.max(1)
+                    train_total += labels.size(0)
+                    train_correct += predicted.eq(labels).sum().item()
+
+                # 7. Periodic Logging and Test Evaluation
+                if epoch % log_freq == 0 or epoch == 1:
+                    model.eval() # Set model to evaluation mode (Freezes Dropout/Batchnorm)
+                    test_loss, test_correct, test_total = 0.0, 0, 0
+
+                    with torch.no_grad(): # Disable gradient calculation for efficiency
+                        for inputs, labels in loaders['test']:
+                            inputs, labels = inputs.to(device), labels.to(device)
+                            outputs = model(inputs)
+                            loss = criterion(outputs, labels)
+
+                            test_loss += loss.item()
+                            _, predicted = outputs.max(1)
+                            test_total += labels.size(0)
+                            test_correct += predicted.eq(labels).sum().item()
+
+                    metrics = {
+                        'epoch': epoch,
+                        'train_loss': train_loss / len(loaders['train']),
+                        'train_acc': train_correct / train_total,
+                        'test_loss': test_loss / len(loaders['test']),
+                        'test_acc': test_correct / test_total
+                    }
+
+                    history.append(metrics)
+                    print(f"Epoch {epoch} | Train Acc: {metrics['train_acc']:.4f} | Test Acc: {metrics['test_acc']:.4f}")
+
+        # 8. Final Artifact Export
+        pd.DataFrame(history).to_csv(run_dir / "train_log.csv", index=False)
+        torch.save({
+            'model_state': model.state_dict(),
+            'optim_state': optimizer.state_dict(),
+            'hyperparams': hyperparams,
+            'seed': seed
+        }, run_dir / "final_model.pth")
+
+        # Inside train_model, before json.dump:
+        # We create a copy so we don't break the actual 'live' dictionary
+        saveable_data_config = data_config.copy()
+
+        # Convert the Compose object into a readable string
+        if 'transform' in saveable_data_config:
+            saveable_data_config['transform'] = str(saveable_data_config['transform'])
+
+        # Save exact configuration for audit trail
+        config_dump = {
+            'model': model_name,
+            'model_params': model_params,
+            'optimizer': optim_class.__name__,
+            'optimizer_params': optim_params,
+            'hyperparams': hyperparams,
+            'data_config': saveable_data_config,
+            'seed': seed
+        }
+        with open(run_dir / "run_config.json", "w") as f:
+            json.dump(config_dump, f, indent=4)
+
+        return model, run_dir
+
+    except Exception as e:
+        # If it crashes, print the error so it's caught in the log too
+        print(f"\nFATAL ERROR during run: {e}")
+        raise e # Re-raise so we see the traceback
+
+    finally:
+        # RESTORE THE TERMINAL
+        sys.stdout = original_stdout
+        if logger is not None:
+            logger.close()
+        print(f"--- Run Complete. Console logging detached ---")
 
 def train_model_ht(model_input, ht_config, model_params, optim_class, optim_params,
                 hyperparams, data_config, loaders, seed, output_root, log_freq=10):
@@ -389,4 +493,4 @@ if __name__ == "__main__":
         config_path = sys.argv[1]
     else:
         config_path = "config.yaml"
-    run_experiment_suite(config_path, num_seeds=1)
+    run_parameter_grid_sweep(config_path, num_seeds=1)

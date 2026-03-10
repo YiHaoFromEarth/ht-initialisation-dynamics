@@ -2,7 +2,7 @@ import torch
 import numpy as np
 from scipy.stats import levy_stable
 from torch import nn
-from src import init_heavy_tailed, apply_heavy_tailed_init  # Adjust path as needed
+from src.utils import init_heavy_tailed, apply_heavy_tailed_init
 
 class ToyModel(nn.Module):
     def __init__(self):

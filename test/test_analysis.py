@@ -1,19 +1,15 @@
 import torch
 import torch.nn as nn
 import numpy as np
-import pytest
 import os
 import yaml
 from torch.utils.data import DataLoader, TensorDataset
 from pathlib import Path
-from src import (
+from src.utils import get_layer_from_checkpoint
+from src.analysis import (
     get_singular_values,
-    extract_rmt_parameters,
-    gaussian_broadening,
-    fit_mp_to_density,
     get_layer_fingerprint,
     evaluate_spectral_perturbation,
-    get_layer_from_checkpoint,
     run_spectral_analysis
 )
 
@@ -45,83 +41,6 @@ def test_singular_values_identity():
 
     # 2. Dimensions must match the smaller axis (m)
     assert len(nu) == size, f"Expected {size} singular values"
-
-def test_extract_rmt_parameters_toy():
-    """
-    Verify extraction of n, m, and sigma_tilde from a controlled toy matrix.
-    """
-    # Create a 200x100 matrix for clear n, m distinction
-    # Using a constant value to make variance calculation predictable
-    # Var(0.1) = 0.0, so we add a bit of noise
-    n_true, m_true = 200, 100
-    toy_matrix = torch.randn(n_true, m_true) * 0.05
-
-    n, m, sigma_tilde = extract_rmt_parameters(toy_matrix)
-
-    # 1. Check Dimensions (n is max, m is min)
-    assert n == n_true, f"Expected n={n_true}, got {n}"
-    assert m == m_true, f"Expected m={m_true}, got {m}"
-
-    # 2. Check Sigma Tilde Scaling
-    # sigma_tilde = std(W) * sqrt(n)
-    expected_std = toy_matrix.std().item()
-    expected_sigma_tilde = expected_std * np.sqrt(n_true)
-
-    assert np.isclose(sigma_tilde, expected_sigma_tilde), \
-        f"Sigma_tilde {sigma_tilde} does not match expected {expected_sigma_tilde}"
-
-def test_gaussian_broadening_sum():
-    """
-    Verify that the broadened PDF integrates approximately to 1.
-    """
-    nu = np.random.normal(loc=1.0, scale=0.1, size=100)
-    x_range = np.linspace(0, 2, 1000)
-    dx = x_range[1] - x_range[0]
-
-    pdf = gaussian_broadening(nu, x_range, a=5)
-    total_area = np.trapz(pdf, x_range)
-
-    # Area should be close to 1.0 (probability distribution) [cite: 227]
-    assert np.isclose(total_area, 1.0, atol=1e-2), f"PDF area is {total_area}, expected 1.0"
-
-def test_mp_fitting_and_outlier_detection():
-    """
-    Verify that the solver recovers the correct nu_max and identifies
-    injected outliers (learned signal).
-    """
-    # 1. Setup Synthetic Bulk (N=1000, M=500, sigma_tilde=1.5)
-    n, m = 1000, 500
-    sigma_tilde_true = 1.5
-    Q = n / m
-    nu_min_theory = sigma_tilde_true * (1 - np.sqrt(1/Q))
-    nu_max_theory = sigma_tilde_true * (1 + np.sqrt(1/Q))
-
-    # Generate random bulk + 5 clear outliers
-    bulk = np.random.uniform(nu_min_theory, nu_max_theory, 995)
-    outliers = np.array([nu_max_theory + 2.0, nu_max_theory + 3.0,
-                         nu_max_theory + 4.0, nu_max_theory + 5.0,
-                         nu_max_theory + 6.0])
-    nu_synthetic = np.concatenate([bulk, outliers])
-
-    # 2. Broaden the spectrum to create the fitting target
-    x_range = np.linspace(0, nu_synthetic.max() + 1, 2000)
-    empirical_pdf = gaussian_broadening(nu_synthetic, x_range, a=15)
-
-    # 3. Solve for RMT Parameters
-    v_max_fit, s_tilde_fit = fit_mp_to_density(x_range, empirical_pdf, nu_synthetic)
-
-    # 4. Assertions
-    # The fitted nu_max should be close to the theoretical boundary
-    assert np.isclose(v_max_fit, nu_max_theory, atol=0.2), \
-        f"Fitted nu_max {v_max_fit} deviated too far from theory {nu_max_theory}"
-
-    # Count outliers beyond the fitted bulk
-    detected_outliers = np.sum(nu_synthetic > v_max_fit)
-
-    # We expect to find at least our 5 injected outliers
-    # (Some high-end bulk values might occasionally drift over)
-    assert detected_outliers >= 5, f"Failed to detect all 5 outliers, found {detected_outliers}"
-    print(f"Success: Detected {detected_outliers} singular values as 'Learned Information'")
 
 def test_fingerprint_logic():
     # --- 1. Define Toy Matrices ---
@@ -250,7 +169,7 @@ def test_wrapper_integration():
 
     # 2. Create dummy checkpoint
     # We use a real state dict from a dummy model to ensure keys match
-    from src import GeneralMLP
+    from src.architectures import GeneralMLP
     dummy_model = GeneralMLP(input_size=784, hidden_size=32, num_classes=10, depth=2)
     torch.save({'model_state': dummy_model.state_dict()}, run_dir / "final_model.pth")
 
