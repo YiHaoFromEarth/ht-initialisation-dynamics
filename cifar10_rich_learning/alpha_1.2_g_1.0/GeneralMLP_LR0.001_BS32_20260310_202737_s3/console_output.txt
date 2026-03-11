@@ -1,0 +1,18 @@
+Logging initialized in: cifar10_rich_learning/alpha_1.2_g_1.0/GeneralMLP_LR0.001_BS32_20260310_202737_s3
+Overwriting weights with Heavy-Tailed Distribution (α=1.2, g=1.0)
+Applying HT Init: alpha=1.2, g=1.0, seed=3
+Epoch 10 | Train Acc: 0.4807 | Test Acc: 0.4593
+Epoch 20 | Train Acc: 0.6299 | Test Acc: 0.4979
+Epoch 30 | Train Acc: 0.7608 | Test Acc: 0.4979
+Epoch 40 | Train Acc: 0.8681 | Test Acc: 0.4912
+Epoch 50 | Train Acc: 0.9226 | Test Acc: 0.4982
+Epoch 60 | Train Acc: 0.9431 | Test Acc: 0.4982
+Epoch 70 | Train Acc: 0.9561 | Test Acc: 0.4941
+Epoch 80 | Train Acc: 0.9598 | Test Acc: 0.5050
+Epoch 90 | Train Acc: 0.9624 | Test Acc: 0.4959
+Epoch 100 | Train Acc: 0.9689 | Test Acc: 0.5023
+Epoch 110 | Train Acc: 0.9642 | Test Acc: 0.4954
+Epoch 120 | Train Acc: 0.9870 | Test Acc: 0.4996
+Epoch 130 | Train Acc: 0.9578 | Test Acc: 0.4883
+Epoch 140 | Train Acc: 0.9843 | Test Acc: 0.4990
+Epoch 150 | Train Acc: 0.9808 | Test Acc: 0.4955

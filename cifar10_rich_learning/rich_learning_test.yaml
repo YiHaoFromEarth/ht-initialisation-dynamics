@@ -1,0 +1,48 @@
+experiment_metadata:
+  name: "MLP_RICH_LEARNING"
+  output_root: "./cifar10_rich_learning"
+  comment: >
+    Observing rich learning on a heavy-tailed initialisation with a simple MLP on CIFAR-10.
+    Particular interest in Lyapunov exponents and the level number variance curve.
+    Five seeds to look for consistency.
+
+model:
+  class_name: "GeneralMLP"
+  params:
+    kwargs:
+      input_size: 3072
+      hidden_size: 512
+      num_classes: 10
+      depth: 3
+      activation_name: "relu"
+      bias: False
+
+optimizer:
+  class_name: "SGD"
+  params:
+    lr: 0.001
+    momentum: 0.95
+    weight_decay: 0.0
+
+data:
+  dataset_name: "CIFAR10"
+  batch_size: 32
+  use_gpu: true
+  fast_load: true
+  transforms:
+    - ToTensor: null
+    - Normalize:
+        mean: [0.4914, 0.4822, 0.4465]
+        std: [0.2470, 0.2435, 0.2616]
+
+heavy_tail:
+  enabled: true
+  alpha: 1.2
+  g: 1.0
+
+hyperparams:
+  epochs: 150
+  seed: 0
+  log_freq: 10
+  device: "cuda"
+  save_weights_history: true

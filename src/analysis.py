@@ -1,9 +1,11 @@
 import torch
+import torch.nn as nn
 import numpy as np
 import copy
+import pandas as pd
 from pathlib import Path
 from scipy.optimize import curve_fit
-from .utils import load_master_config, get_dataset_class, get_transform, get_universal_loader, model_factory
+from .utils import load_master_config, get_dataset_class, get_transform, get_universal_loader, model_factory, apply_spectral_filter_to_model, evaluate_test_acc
 
 def get_singular_values(matrix):
     """
@@ -258,8 +260,116 @@ def calculate_true_mle(weights_list, input_sample, activation='relu', device='cp
     # Average log-expansion across the network depth
     return total_log_expansion / num_layers
 
-"""This section contains contains functions for random matrix theory (RMT) analysis. Adapted from 10.1103/PhysRevE.106.054124"""
+def spectral_kl_divergence(W_original, W_filtered, epsilon=1e-10):
+    """
+    Measures the Information Loss between the original and filtered weight
+    spectra using KL Divergence.
+    """
+    # 1. Get the spectra (Singular Values)
+    # We treat the singular values as a probability distribution of "Energy"
+    s_orig = torch.linalg.svdvals(W_original)
+    s_filt = torch.linalg.svdvals(W_filtered)
 
+    # 2. Normalize into probability distributions (sum to 1)
+    # We add epsilon to ensure numerical stability (no log(0))
+    p = (s_orig + epsilon) / (s_orig.sum() + epsilon)
+    q = (s_filt + epsilon) / (s_filt.sum() + epsilon)
+
+    # 3. Calculate KL Divergence: sum(p * log(p/q))
+    # Higher value = Higher information loss / Spectrum distortion
+    kl_div = torch.sum(p * torch.log(p / q))
+
+    return kl_div.item()
+
+def run_spectral_scan(model, test_loader, layer_key_func,
+                      window_size_perc=0.1,
+                      kernel='uniform',
+                      num_centers=15,
+                      iterations=1,
+                      device='cpu'):
+    """
+    Orchestrates a full spectral scan across different centers and kernel types.
+
+    Returns:
+        pd.DataFrame: A table containing center, kernel_type, mean_acc, and std_acc.
+    """
+    scan_results = []
+    # Generate centers from 0 (Outliers/Head) to 1.0 (Bulk/Tail)
+    # Note: We cap it at 1.0 - window_size/2 to keep the window inside the spectrum
+    half_win = window_size_perc / 2
+    centers = np.linspace(half_win, 1.0 - half_win, num_centers)
+
+    original_weights = {n: m.weight.data.detach().clone()
+                        for n, m in model.named_modules()
+                        if isinstance(m, (nn.Linear, nn.Conv2d)) and layer_key_func(n)}
+
+    for c in centers:
+        # 1. Generate the modified model using our parent function
+        # This uses deepcopy internally, so the original 'model' stays 'Blessed'
+        reconstructed_model = apply_spectral_filter_to_model(
+            model,
+            layer_key_func,
+            center_perc=c,
+            window_size_perc=window_size_perc,
+            kernel_type=kernel
+        )
+
+        # 2. KL Divergence Calculation (Spectral Info Loss)
+        kl_values = []
+        for name, weight_orig in original_weights.items():
+            # Extract the corresponding layer from the reconstructed model
+            # We use r_module.weight.data to get the filtered tensor
+            r_module = dict(reconstructed_model.named_modules())[name]
+            weight_recon = r_module.weight.data
+
+            # Use our 'Atomic' KL function
+            kl_val = spectral_kl_divergence(weight_orig, weight_recon)
+            kl_values.append(kl_val)
+
+        # Average KL across targeted layers (Mean Spectral Distortion)
+        mean_kl = np.mean(kl_values) if kl_values else 0.0
+
+        # 3. Evaluate performance (Mean and Std)
+        mean_acc, std_acc = evaluate_test_acc(
+            reconstructed_model,
+            test_loader,
+            num_iterations=iterations,
+            device=device
+        )
+
+        # 4. Store the metadata for plotting
+        scan_results.append({
+            'center_perc': c,
+            'kernel_type': kernel,
+            'accuracy_mean': mean_acc,
+            'accuracy_std': std_acc,
+            'kl_divergence': mean_kl,
+            'window_size': window_size_perc
+        })
+
+    return pd.DataFrame(scan_results)
+
+def get_rmt_threshold_percentage(weight_tensor, broadener):
+    """
+    Returns the rank percentage where the RMT bulk ends.
+    Anything below this percentage (closer to 0.0) is the Tail/Outliers.
+    Anything above this (closer to 1.0) is the Bulk.
+    """
+    # 1. Get singular values
+    nu = torch.linalg.svdvals(weight_tensor).cpu().numpy()
+
+    # 2. Fit MP using the authors' official logic
+    # We use range_of_y_to_fit=0.7 as per your provided code
+    a_fit, nuMin_fit, nuMax_fit, _ = fit_marcenkoPastur(nu, broadener, range_of_y_to_fit=0.7)
+
+    # 3. Find how many singular values are LARGER than the theoretical nuMax
+    # Because SVD is sorted descending: [Outliers, Tail, nuMax, Bulk...]
+    num_outside_bulk = np.sum(nu > nuMax_fit)
+
+    # 4. Return as a percentage of the total rank
+    return num_outside_bulk / len(nu)
+
+"""This section contains contains functions for random matrix theory (RMT) analysis. Adapted from 10.1103/PhysRevE.106.054124"""
 from typing import List, Tuple, Any, Union
 from abc import ABC, abstractmethod
 import copy
@@ -270,11 +380,6 @@ from numba import jit, prange
 from scipy.special import erf
 from scipy.optimize import curve_fit
 import scipy.stats
-from scipy.ndimage.filters import uniform_filter1d
-try:
-    from scipy.stats.sampling import SimpleRatioUniforms
-except Exception as e:
-    print(e, "\nFor importing scipy.stats.sampling, scipy version >1.8 might be needed.")
 from functools import partial
 import powerlaw
 from tqdm import tqdm

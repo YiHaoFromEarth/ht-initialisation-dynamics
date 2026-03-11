@@ -1,0 +1,18 @@
+Logging initialized in: mnist_mlp_run_dataset/alpha_2.0_g_0.5/GeneralMLP_LR0.001_BS1024_20260310_205517_s0
+Overwriting weights with Heavy-Tailed Distribution (α=2.0, g=0.5)
+Applying HT Init: alpha=2.0, g=0.5, seed=0
+Epoch 10 | Train Acc: 0.2591 | Test Acc: 0.2604
+Epoch 20 | Train Acc: 0.3970 | Test Acc: 0.3981
+Epoch 30 | Train Acc: 0.5173 | Test Acc: 0.5240
+Epoch 40 | Train Acc: 0.5747 | Test Acc: 0.5794
+Epoch 50 | Train Acc: 0.6098 | Test Acc: 0.6168
+Epoch 60 | Train Acc: 0.6339 | Test Acc: 0.6395
+Epoch 70 | Train Acc: 0.6481 | Test Acc: 0.6536
+Epoch 80 | Train Acc: 0.6552 | Test Acc: 0.6604
+Epoch 90 | Train Acc: 0.6539 | Test Acc: 0.6594
+Epoch 100 | Train Acc: 0.6441 | Test Acc: 0.6490
+Epoch 110 | Train Acc: 0.6172 | Test Acc: 0.6188
+Epoch 120 | Train Acc: 0.5684 | Test Acc: 0.5652
+Epoch 130 | Train Acc: 0.4914 | Test Acc: 0.4826
+Epoch 140 | Train Acc: 0.3899 | Test Acc: 0.3841
+Epoch 150 | Train Acc: 0.2869 | Test Acc: 0.2807

@@ -11,6 +11,7 @@ from torchvision import datasets, transforms
 from . import architectures
 from scipy.stats import levy_stable
 from pathlib import Path
+from copy import deepcopy
 
 class HookManager:
     def __init__(self):
@@ -364,3 +365,77 @@ def spectral_filter(weight_tensor, center_perc, window_size_perc, kernel_type='u
     # Apply mask and reconstruct matrix
     S_filtered = S * mask
     return U @ torch.diag(S_filtered) @ Vh
+
+def apply_spectral_filter_to_model(model, layer_key_func, center_perc, window_size_perc, kernel_type='uniform'):
+    """
+    Applies spectral reconstruction to specific layers of a model.
+
+    Args:
+        model (nn.Module): The live model instance.
+        layer_key_func (callable): A function that returns True for layers to be filtered
+                                   (e.g., lambda name: 'features.0' in name).
+        center_perc (float): Center of the spectral window (0.0 to 1.0).
+        window_size_perc (float): FWHM or Width of the window.
+        kernel_type (str): 'uniform' or 'gaussian'.
+
+    Returns:
+        nn.Module: A copy of the model with altered weights.
+    """
+    # Create a deep copy to avoid mutating the original model in the loop
+    altered_model = deepcopy(model)
+    altered_model.eval() # Ensure eval mode for consistent behavior
+
+    with torch.no_grad(): # No gradients needed for reconstruction analysis
+        for name, module in altered_model.named_modules():
+            if isinstance(module, (nn.Linear, nn.Conv2d)) and layer_key_func(name):
+                # 1. Access the raw weight tensor
+                W_orig = module.weight.data
+
+                # 2. Call your 'Atomic' math function from equations.py
+                # This performs the SVD, filtering, and reconstruction
+                W_filtered = spectral_filter(
+                    W_orig,
+                    center_perc,
+                    window_size_perc,
+                    kernel_type=kernel_type
+                )
+
+                # 3. Replace the weights in-place
+                module.weight.copy_(W_filtered)
+
+    return altered_model
+
+def evaluate_test_acc(model, test_loader, num_iterations=1, device='cpu'):
+    """
+    Evaluates the model performance over multiple iterations.
+    """
+    model.eval()
+    model.to(device)
+
+    all_accuracies = []
+
+    with torch.no_grad():
+        for i in range(num_iterations):
+            correct = 0
+            total = 0
+
+            # If your loader is a TensorDataset from the 'fast_load' path,
+            # this loop will be extremely fast.
+            for images, labels in test_loader:
+                images, labels = images.to(device), labels.to(device)
+
+                outputs = model(images)
+                _, predicted = torch.max(outputs.data, 1)
+
+                total += labels.size(0)
+                correct += (predicted == labels).sum().item()
+
+            acc = 100 * correct / total
+            all_accuracies.append(acc)
+
+    # Convert to numpy for stats
+    acc_array = np.array(all_accuracies)
+    mean_acc = np.mean(acc_array)
+    std_acc = np.std(acc_array) if num_iterations > 1 else 0.0
+
+    return mean_acc, std_acc
