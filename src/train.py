@@ -15,6 +15,8 @@ from .utils import (
     get_transform,
     set_seed,
     optimizer_factory,
+    apply_heavy_tailed_init,
+    setup_experiment,
     TeeLogger,
 )
 
@@ -368,30 +370,8 @@ def run_experiment_suite(config_path="config.yaml", num_seeds=1):
         num_seeds (int): Number of consecutive seeds to run in the sweep.
     """
     # 1. Load Master Configuration
-    cfg = load_master_config(config_path)
-    data_cfg = cfg['data_config']
+    _, loaders, cfg = setup_experiment(config_path, device='cuda' if torch.cuda.is_available() else 'cpu')
     base_output = cfg['full_config']['experiment_metadata']['output_root']
-
-    # 2. Resolve Dataset and Transforms
-    dataset_class = get_dataset_class(data_cfg['dataset_name'])
-    data_cfg['transform'] = get_transform(data_cfg.get('transforms', []))
-
-    # 3. Setup Data Loaders
-    is_omniglot = "Omniglot" in data_cfg['dataset_name']
-    train_key = 'background' if is_omniglot else 'train'
-
-    test_ds = dataset_class(
-        root='./data',
-        **{train_key: False},
-        download=True,
-        transform=data_cfg['transform']
-    )
-
-    loaders = {
-        'train': get_universal_loader(dataset_class, data_cfg, **{train_key: True}, download=True, root='./data'),
-        'test': get_universal_loader(dataset_class, data_cfg, **{train_key: False}, download=True, root='./data'),
-        'test_dataset': test_ds
-    }
 
     # 4. Multi-Seed Sweep Execution
     starting_seed = cfg['full_config']['hyperparams'].get('seed', 0)
@@ -423,22 +403,8 @@ def run_parameter_grid_sweep(config_path="sweep_config.yaml", num_seeds=1):
     Saves results into structured subfolders: output_root/alpha_g/seed_k/
     """
     # 1. Load Configuration and Setup Environment
-    cfg = load_master_config(config_path)
-    data_cfg = cfg['data_config']
+    _, loaders, cfg = setup_experiment(config_path, device='cuda' if torch.cuda.is_available() else 'cpu')
     base_output = Path(cfg['full_config']['experiment_metadata']['output_root'])
-
-    # Resolve Dataset and Loader Logic
-    dataset_class = get_dataset_class(data_cfg['dataset_name'])
-    data_cfg['transform'] = get_transform(data_cfg.get('transforms', []))
-
-    is_omniglot = "Omniglot" in data_cfg['dataset_name']
-    train_key = 'background' if is_omniglot else 'train'
-
-    loaders = {
-        'train': get_universal_loader(dataset_class, data_cfg, **{train_key: True}, download=True, root='./data'),
-        'test': get_universal_loader(dataset_class, data_cfg, **{train_key: False}, download=True, root='./data'),
-        'test_dataset': dataset_class(root='./data', **{train_key: False}, download=True, transform=data_cfg['transform'])
-    }
 
     # 2. Extract Sweep Parameters from YAML
     ht_settings = cfg['full_config'].get('heavy_tail', {})

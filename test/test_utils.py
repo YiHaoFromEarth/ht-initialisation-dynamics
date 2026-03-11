@@ -1,8 +1,11 @@
 import torch
 import numpy as np
+import pytest
 from scipy.stats import levy_stable
 from torch import nn
-from src.utils import init_heavy_tailed, apply_heavy_tailed_init
+from src.utils import init_heavy_tailed, apply_heavy_tailed_init, setup_experiment
+from src.architectures import GeneralMLP
+from pathlib import Path
 
 class ToyModel(nn.Module):
     def __init__(self):
@@ -121,3 +124,47 @@ def test_deterministic_model_init():
 
     for p1, p2 in zip(model1.parameters(), model2.parameters()):
         assert torch.equal(p1, p2), "Model init is not deterministic for the same base_seed."
+
+def test_setup_from_yaml():
+    """
+    Validates that setup_experiment correctly reconstructs the model
+    and data loaders from a YAML configuration.
+    """
+    current_dir = Path(__file__).parent
+    config_path = current_dir / "test_config.yaml"
+
+    # 1. Run the setup
+    model, loaders, cfg = setup_experiment(config_path, device='cuda' if torch.cuda.is_available() else 'cpu')
+
+    # 2. Structural Assertions
+    assert isinstance(model, GeneralMLP), "Model should be an instance of GeneralMLP"
+
+    # Check if the kwargs were respected (Hidden Size 784, Depth 3)
+    # We check the features sequence length
+    linear_layers = [l for l in model.features if isinstance(l, torch.nn.Linear)]
+    assert len(linear_layers) == 3, f"Expected 3 hidden layers, got {len(linear_layers)}"
+    assert linear_layers[0].out_features == 784, "Hidden size should be 784"
+    assert linear_layers[0].bias is None, "Bias should be False as per config"
+
+    # 3. Data Pipeline Assertions
+    assert "train" in loaders and "test" in loaders, "Loaders dictionary must contain train and test"
+
+    # Verify the batch size from config (128)
+    assert loaders['test'].batch_size == 128, "Batch size should match the data_config"
+
+    # Verify the dataset (MNIST)
+    assert cfg['data_config']['dataset_name'] == "MNIST", "Config should specify MNIST"
+
+    # 4. Input Forward Pass Check (The "Sanity Check")
+    # Grab one batch and see if it flows through the model
+    images, labels = next(iter(loaders['test']))
+    try:
+        output = model(images)
+        assert output.shape == (128, 10), f"Expected output shape (128, 10), got {output.shape}"
+    except Exception as e:
+        pytest.fail(f"Forward pass failed with error: {e}")
+
+if __name__ == "__main__":
+    # Allows running the test directly via 'python test_setup.py'
+    test_setup_from_yaml()
+    print("setup_experiment unit test passed!")

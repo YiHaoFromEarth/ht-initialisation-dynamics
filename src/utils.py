@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from torchvision import datasets, transforms
 from . import architectures
 from scipy.stats import levy_stable
+from pathlib import Path
 
 class HookManager:
     def __init__(self):
@@ -289,3 +290,46 @@ def get_layer_from_checkpoint(model_path, layer_key):
         raise KeyError(f"Layer '{layer_key}' not found. Available: {available}")
 
     return state_dict[layer_key].detach().float()
+
+def setup_experiment(config_path, checkpoint_path=None, device='cpu'):
+    """
+    Standardizes model and data loading using the project's factory
+    and configuration structures.
+    """
+    # 1. Load Master Configuration
+    cfg = load_master_config(config_path)
+    data_cfg = cfg['data_config']
+    model_params = cfg['model_params']
+    model_input = cfg['model_class']
+
+    # 2. Setup Data (Transforms & Loaders)
+    dataset_class = get_dataset_class(data_cfg['dataset_name'])
+    data_cfg['transform'] = get_transform(data_cfg.get('transforms', []))
+
+    loaders = {
+        'train': get_universal_loader(dataset_class, data_cfg, train=True, download=True, root='./data'),
+        'test': get_universal_loader(dataset_class, data_cfg, train=False, download=True, root='./data')
+    }
+
+    # 3. Flexible Model Acquisition (Factory Path)
+    m_args = model_params.get('args', [])
+    m_kwargs = model_params.get('kwargs', {})
+
+    # Initialize using your existing factory logic
+    model = model_factory(model_input, *m_args, **m_kwargs)
+
+    if model is None:
+        raise ValueError(f"Failed to initialize model {model_input} from factory.")
+
+    model = model.to(device)
+
+    # 4. Load Weights (If provided)
+    if checkpoint_path:
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        # Handle state_dict unpacking (supports bfp16 or full precision)
+        state_dict = checkpoint.get('model_state', checkpoint)
+        model.load_state_dict(state_dict)
+        model.eval() # Set to evaluation mode for consistent metrics
+        print(f"Successfully loaded checkpoint: {Path(checkpoint_path).name}")
+
+    return model, loaders, cfg
