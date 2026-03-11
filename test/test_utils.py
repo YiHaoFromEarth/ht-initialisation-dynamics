@@ -3,7 +3,7 @@ import numpy as np
 import pytest
 from scipy.stats import levy_stable
 from torch import nn
-from src.utils import init_heavy_tailed, apply_heavy_tailed_init, setup_experiment
+from src.utils import init_heavy_tailed, apply_heavy_tailed_init, setup_experiment, spectral_filter
 from src.architectures import GeneralMLP
 from pathlib import Path
 
@@ -163,6 +163,37 @@ def test_setup_from_yaml():
         assert output.shape == (128, 10), f"Expected output shape (128, 10), got {output.shape}"
     except Exception as e:
         pytest.fail(f"Forward pass failed with error: {e}")
+
+def test_uniform_filter_logic():
+    size = 100
+    W = torch.eye(size)
+    center, width = 0.5, 0.2
+
+    W_filtered = spectral_filter(W, center, width, kernel_type='uniform')
+
+    # Check diagonal values directly - they should be exactly 1.0 or 0.0
+    # because W was Identity. No SVD sorting to worry about here.
+    diag = torch.diag(W_filtered)
+
+    # 20% of 100 is 20. Indices 40 to 60 should be 1.
+    assert torch.all(diag[45:55] == 1.0)
+    assert torch.all(diag[:35] == 0.0)
+    assert torch.all(diag[65:] == 0.0)
+
+def test_gaussian_fwhm_logic():
+    size = 1000
+    W = torch.eye(size)
+    center, width = 0.5, 0.1
+
+    W_filtered = spectral_filter(W, center, width, kernel_type='gaussian')
+    diag = torch.diag(W_filtered)
+
+    # The center (index 500) must be 1.0
+    assert torch.isclose(diag[500], torch.tensor(1.0), atol=1e-3)
+
+    # The FWHM points (approx index 450 and 550) must be around 0.5
+    assert torch.isclose(diag[450], torch.tensor(0.5), atol=1e-2)
+    assert torch.isclose(diag[550], torch.tensor(0.5), atol=1e-2)
 
 if __name__ == "__main__":
     # Allows running the test directly via 'python test_setup.py'

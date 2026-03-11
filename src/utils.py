@@ -333,3 +333,34 @@ def setup_experiment(config_path, checkpoint_path=None, device='cpu'):
         print(f"Successfully loaded checkpoint: {Path(checkpoint_path).name}")
 
     return model, loaders, cfg
+
+def spectral_filter(weight_tensor, center_perc, window_size_perc, kernel_type='uniform'):
+    """
+    Isolates a window of singular values using either a Rectangular or Gaussian filter.
+    The window_size_perc represents the FWHM for Gaussian kernels.
+    """
+    U, S, Vh = torch.linalg.svd(weight_tensor, full_matrices=False)
+
+    num_s = len(S)
+    rank_axis = torch.linspace(0, 1, steps=num_s).to(S.device)
+
+    if kernel_type == 'uniform':
+        # Hard cutoff: 1.0 within [center - width/2, center + width/2]
+        half_width = window_size_perc / 2
+        mask = ((rank_axis >= center_perc - half_width) &
+                (rank_axis <= center_perc + half_width)).float()
+
+    elif kernel_type == 'gaussian':
+        # Gaussian filter where FWHM = window_size_perc
+        # Relationship: sigma = FWHM / (2 * sqrt(2 * ln(2)))
+        sigma = window_size_perc / (2 * np.sqrt(2 * np.log(2)))
+
+        # We use the standard Gaussian form: exp(-(x - mu)^2 / (2 * sigma^2))
+        mask = torch.exp(-((rank_axis - center_perc)**2) / (2 * sigma**2))
+
+    else:
+        raise ValueError(f"Unknown kernel type: {kernel_type}")
+
+    # Apply mask and reconstruct matrix
+    S_filtered = S * mask
+    return U @ torch.diag(S_filtered) @ Vh
