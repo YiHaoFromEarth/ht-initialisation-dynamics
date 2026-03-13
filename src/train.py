@@ -4,15 +4,12 @@ import pandas as pd
 import json
 import sys
 import itertools
+import yaml
 from datetime import datetime
 from torchinfo import summary
 from pathlib import Path
 from .utils import (
     model_factory,
-    load_master_config,
-    get_universal_loader,
-    get_dataset_class,
-    get_transform,
     set_seed,
     optimizer_factory,
     apply_heavy_tailed_init,
@@ -251,7 +248,7 @@ def train_model_ht(model_input, ht_config, model_params, optim_class, optim_para
             f.write(str(stats))
 
         # 5.1. Initial Weight Snapshot
-        if hyperparams.get('save_weights_history', False):
+        if hyperparams.get('save_weights_history', False) and 0 in hyperparams.get('weight_log_epochs', []):
             checkpoint_dir = run_dir / "checkpoints"
             checkpoint_dir.mkdir(exist_ok=True)
             save_half_precision(model.state_dict(), checkpoint_dir / f"weights_epoch_0.pth")
@@ -259,6 +256,42 @@ def train_model_ht(model_input, ht_config, model_params, optim_class, optim_para
         # 6. Training Loop Logic
         criterion = nn.CrossEntropyLoss()
         history = []
+
+        # --- Epoch 0: Initial Evaluation ---
+        model.eval()
+        train_loss, train_correct, train_total = 0.0, 0, 0
+        test_loss, test_correct, test_total = 0.0, 0, 0
+
+        with torch.no_grad():
+            # Evaluate on train set
+            for inputs, labels in loaders['train']:
+                inputs, labels = inputs.to(device), labels.to(device)
+                outputs = model(inputs)
+                loss = criterion(outputs, labels)
+                train_loss += loss.item()
+                _, predicted = outputs.max(1)
+                train_total += labels.size(0)
+                train_correct += predicted.eq(labels).sum().item()
+
+            # Evaluate on test set
+            for inputs, labels in loaders['test']:
+                inputs, labels = inputs.to(device), labels.to(device)
+                outputs = model(inputs)
+                loss = criterion(outputs, labels)
+                test_loss += loss.item()
+                _, predicted = outputs.max(1)
+                test_total += labels.size(0)
+                test_correct += predicted.eq(labels).sum().item()
+
+        metrics_0 = {
+            'epoch': 0,
+            'train_loss': train_loss / len(loaders['train']),
+            'train_acc': train_correct / train_total,
+            'test_loss': test_loss / len(loaders['test']),
+            'test_acc': test_correct / test_total,
+        }
+        history.append(metrics_0)
+        print(f"Epoch 0 | Train Acc: {metrics_0['train_acc']:.4f} | Test Acc: {metrics_0['test_acc']:.4f}")
 
         for epoch in range(1, hyperparams['epochs'] + 1):
                 model.train()
@@ -311,11 +344,11 @@ def train_model_ht(model_input, ht_config, model_params, optim_class, optim_para
                     history.append(metrics)
                     print(f"Epoch {epoch} | Train Acc: {metrics['train_acc']:.4f} | Test Acc: {metrics['test_acc']:.4f}")
 
-                    # --- New: Periodic Weight Saving for Physics Analysis ---
-                    if hyperparams.get('save_weights_history', False):
-                        checkpoint_dir = run_dir / "checkpoints"
-                        checkpoint_dir.mkdir(exist_ok=True)
-                        save_half_precision(model.state_dict(), checkpoint_dir / f"weights_epoch_{epoch}.pth")
+                # --- New: Periodic Weight Saving for Physics Analysis ---
+                if hyperparams.get('save_weights_history', False) and epoch in hyperparams.get('weight_log_epochs', []):
+                    checkpoint_dir = run_dir / "checkpoints"
+                    checkpoint_dir.mkdir(exist_ok=True)
+                    save_half_precision(model.state_dict(), checkpoint_dir / f"weights_epoch_{epoch}.pth")
 
         # 8. Final Artifact Export
         pd.DataFrame(history).to_csv(run_dir / "train_log.csv", index=False)
@@ -324,7 +357,7 @@ def train_model_ht(model_input, ht_config, model_params, optim_class, optim_para
             'optim_state': optimizer.state_dict(),
             'hyperparams': hyperparams,
             'seed': seed
-        }, run_dir / "final_model.pth")
+        }, run_dir / "checkpoints/final_model.pth")
 
         # Inside train_model, before json.dump:
         # We create a copy so we don't break the actual 'live' dictionary
@@ -342,6 +375,7 @@ def train_model_ht(model_input, ht_config, model_params, optim_class, optim_para
             'optimizer_params': optim_params,
             'hyperparams': hyperparams,
             'data_config': saveable_data_config,
+            'ht_config': ht_config,
             'seed': seed
         }
         with open(run_dir / "run_config.json", "w") as f:
@@ -361,7 +395,7 @@ def train_model_ht(model_input, ht_config, model_params, optim_class, optim_para
             logger.close()
         print(f"--- Run Complete. Console logging detached ---")
 
-def run_experiment_suite(config_path="config.yaml", num_seeds=1):
+def run_experiment(config_path="config.yaml", num_seeds=1):
     """
     Executes an experiment sweep by reading a config file.
 
@@ -378,6 +412,7 @@ def run_experiment_suite(config_path="config.yaml", num_seeds=1):
     seeds = range(starting_seed, starting_seed + num_seeds)
     ht_config = cfg['full_config'].get('heavy_tail', {})
 
+    print(f"Starting experiment with {num_seeds} seeds, outputting to: {base_output}")
     for s in seeds:
         print(f"\n--- STARTING SEED {s} ---")
 
@@ -397,7 +432,7 @@ def run_experiment_suite(config_path="config.yaml", num_seeds=1):
             log_freq=cfg['hyperparams'].get('log_freq', 10)
         )
 
-def run_parameter_grid_sweep(config_path="sweep_config.yaml", num_seeds=1):
+def run_parameter_sweep(config_path="sweep_config.yaml", num_seeds=1):
     """
     Iterates through a grid of alpha and g values across multiple seeds.
     Saves results into structured subfolders: output_root/alpha_g/seed_k/
@@ -459,4 +494,15 @@ if __name__ == "__main__":
         config_path = sys.argv[1]
     else:
         config_path = "config.yaml"
-    run_parameter_grid_sweep(config_path, num_seeds=1)
+
+    with open(config_path, "r") as f:
+        cfg = yaml.safe_load(f)
+
+    ht_config = cfg.get("heavy_tail", {})
+    alpha = ht_config.get("alpha", 1.2)
+    g = ht_config.get("g", 1.0)
+
+    if isinstance(alpha, list) or isinstance(g, list):
+        run_parameter_sweep(config_path, num_seeds=int(sys.argv[2]) if len(sys.argv) > 2 else 1)
+    else:
+        run_experiment(config_path, num_seeds=int(sys.argv[2]) if len(sys.argv) > 2 else 1)
