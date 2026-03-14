@@ -8,6 +8,7 @@ import yaml
 from datetime import datetime
 from torchinfo import summary
 from pathlib import Path
+from tqdm import tqdm
 from .utils import (
     model_factory,
     set_seed,
@@ -291,9 +292,13 @@ def train_model_ht(model_input, ht_config, model_params, optim_class, optim_para
             'test_acc': test_correct / test_total,
         }
         history.append(metrics_0)
-        print(f"Epoch 0 | Train Acc: {metrics_0['train_acc']:.4f} | Test Acc: {metrics_0['test_acc']:.4f}")
+        sys.stdout.log.write(f"Epoch 0 | Train Acc: {metrics_0['train_acc']:.4f} | Test Acc: {metrics_0['test_acc']:.4f}\n")
+        sys.stdout.log.flush()
 
-        for epoch in range(1, hyperparams['epochs'] + 1):
+        pbar = tqdm(range(1, hyperparams['epochs'] + 1),
+            file=sys.stdout.terminal, # Write bar to original terminal
+            desc=f"alpha={ht_config.get('alpha','N/A')} g={ht_config.get('g','N/A')}")
+        for epoch in pbar:
                 model.train()
                 train_loss, train_correct, train_total = 0.0, 0, 0
 
@@ -315,6 +320,9 @@ def train_model_ht(model_input, ht_config, model_params, optim_class, optim_para
                     _, predicted = outputs.max(1)
                     train_total += labels.size(0)
                     train_correct += predicted.eq(labels).sum().item()
+
+                current_train_acc = train_correct / train_total
+                current_train_loss = train_loss / len(loaders['train'])
 
                 # 7. Periodic Logging and Test Evaluation
                 if epoch % log_freq == 0:
@@ -342,13 +350,19 @@ def train_model_ht(model_input, ht_config, model_params, optim_class, optim_para
                     }
 
                     history.append(metrics)
-                    print(f"Epoch {epoch} | Train Acc: {metrics['train_acc']:.4f} | Test Acc: {metrics['test_acc']:.4f}")
+                    sys.stdout.log.write(f"Epoch {epoch} | Train Acc: {metrics['train_acc']:.4f} | Test Acc: {metrics['test_acc']:.4f}")
+                    sys.stdout.log.flush()
 
                 # --- New: Periodic Weight Saving for Physics Analysis ---
                 if hyperparams.get('save_weights_history', False) and epoch in hyperparams.get('weight_log_epochs', []):
                     checkpoint_dir = run_dir / "checkpoints"
                     checkpoint_dir.mkdir(exist_ok=True)
                     save_half_precision(model.state_dict(), checkpoint_dir / f"weights_epoch_{epoch}.pth")
+
+                pbar.set_postfix({
+                "T-Acc": f"{current_train_acc:.4f}",
+                "Loss": f"{current_train_loss:.3f}"
+                })
 
         # 8. Final Artifact Export
         pd.DataFrame(history).to_csv(run_dir / "train_log.csv", index=False)

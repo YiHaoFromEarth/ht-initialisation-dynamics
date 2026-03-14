@@ -1,0 +1,80 @@
+{
+    "model": "GeneralMLP",
+    "model_params": {
+        "kwargs": {
+            "input_size": 784,
+            "hidden_size": 784,
+            "num_classes": 10,
+            "depth": 9,
+            "activation_name": "tanh",
+            "bias": false
+        }
+    },
+    "optimizer": "SGD",
+    "optimizer_params": {
+        "lr": 0.001,
+        "momentum": 0.0,
+        "weight_decay": 0.0
+    },
+    "hyperparams": {
+        "epochs": 650,
+        "seed": 0,
+        "log_freq": 1,
+        "device": "cuda",
+        "save_weights_history": true,
+        "weight_log_epochs": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            6,
+            8,
+            10,
+            15,
+            20,
+            30,
+            40,
+            50,
+            75,
+            100,
+            125,
+            150,
+            200,
+            250,
+            300,
+            400,
+            500,
+            550,
+            600
+        ]
+    },
+    "data_config": {
+        "dataset_name": "MNIST",
+        "batch_size": 1024,
+        "use_gpu": true,
+        "fast_load": true,
+        "transforms": [
+            {
+                "ToTensor": null
+            },
+            {
+                "Normalize": {
+                    "mean": [
+                        0.1307
+                    ],
+                    "std": [
+                        0.3081
+                    ]
+                }
+            }
+        ],
+        "transform": "Compose(\n    ToTensor()\n    Normalize(mean=[0.1307], std=[0.3081])\n)"
+    },
+    "ht_config": {
+        "enabled": true,
+        "alpha": 1.0,
+        "g": 3.0
+    },
+    "seed": 0
+}

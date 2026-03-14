@@ -2,7 +2,7 @@ experiment_metadata:
   name: "Standard Runs on MNIST with MLP"
   output_root: "./mnist_mlp_sweep"
   comment: >
-    Basic Sweep over 9 pairs of alpha and g for MNIST, replicating Qu et al. 2022 runs.
+    Basic Sweep over 25 pairs of alpha and g for MNIST, replicating Qu et al. 2022 runs.
     A basic dataset to analyse extended criticality with various methods.
 
 model:
