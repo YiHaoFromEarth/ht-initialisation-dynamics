@@ -5,7 +5,16 @@ import copy
 import pandas as pd
 from pathlib import Path
 from scipy.optimize import curve_fit
-from .utils import load_master_config, get_dataset_class, get_transform, get_universal_loader, model_factory, apply_spectral_filter_to_model, evaluate_test_acc
+from .utils import (
+    load_master_config,
+    get_dataset_class,
+    get_transform,
+    get_universal_loader,
+    model_factory,
+    apply_spectral_filter_to_model,
+    evaluate_test_acc,
+)
+
 
 def get_singular_values(matrix):
     """
@@ -17,6 +26,7 @@ def get_singular_values(matrix):
     # Paper analyzes singular values directly
     s = torch.linalg.svdvals(matrix.float())
     return s.detach().cpu().numpy()
+
 
 def get_layer_fingerprint(W_init, W_final):
     """
@@ -40,21 +50,21 @@ def get_layer_fingerprint(W_init, W_final):
 
     # Effective Rank (Stable Rank)
     # Measures dimensionality/utility of the width
-    eff_rank = (torch.sum(S_t**2)) / (S_t[0]**2)
+    eff_rank = (torch.sum(S_t**2)) / (S_t[0] ** 2)
 
     # Inverse Participation Ratio (IPR) of Top Vector
     # Measures localization (Spiky vs. Distributed)
     v_top = V_t[:, 0]
-    ipr = torch.sum(v_top**4) / (torch.sum(v_top**2)**2)
+    ipr = torch.sum(v_top**4) / (torch.sum(v_top**2) ** 2)
 
     # Participation Ratio of Singular Values
     # Measures how 'flat' the eigenvalue distribution is
-    part_ratio = (torch.sum(S_t)**2) / (len(S_t) * torch.sum(S_t**2))
+    part_ratio = (torch.sum(S_t) ** 2) / (len(S_t) * torch.sum(S_t**2))
 
     # Get singular values
     s = torch.linalg.svdvals(W_t.detach().float())
     s2 = s**2
-    p = s2 / s2.sum() # Normalized power
+    p = s2 / s2.sum()  # Normalized power
 
     # 1. Hill Estimator (Simplified)
     # We look at the top 10% of singular values to estimate the tail
@@ -69,17 +79,20 @@ def get_layer_fingerprint(W_init, W_final):
     dominance = s[0] / s.sum()
 
     return {
-        'displacement': displacement.item(),
-        'effective_rank': eff_rank.item(),
-        'ipr': ipr.item(),
-        'participation_ratio': part_ratio.item(),
-        'max_singular_val': S_t[0].item(),
-        'hill_alpha': hill.item(),
-        'spectral_entropy': entropy.item(),
-        'dominance_ratio': dominance.item(),
+        "displacement": displacement.item(),
+        "effective_rank": eff_rank.item(),
+        "ipr": ipr.item(),
+        "participation_ratio": part_ratio.item(),
+        "max_singular_val": S_t[0].item(),
+        "hill_alpha": hill.item(),
+        "spectral_entropy": entropy.item(),
+        "dominance_ratio": dominance.item(),
     }
 
-def evaluate_spectral_perturbation(model, loader, layer_key, k, mode='ablate', device='cpu'):
+
+def evaluate_spectral_perturbation(
+    model, loader, layer_key, k, mode="ablate", device="cpu"
+):
     """
     Evaluates model accuracy after surgically modifying a layer's spectral components.
 
@@ -96,7 +109,7 @@ def evaluate_spectral_perturbation(model, loader, layer_key, k, mode='ablate', d
 
     # 2. Extract the weight matrix
     # Format: features.0.weight -> getattr(model, 'features')[0].weight
-    parts = layer_key.split('.')
+    parts = layer_key.split(".")
     target = eval_model
     for part in parts[:-1]:
         if part.isdigit():
@@ -109,10 +122,10 @@ def evaluate_spectral_perturbation(model, loader, layer_key, k, mode='ablate', d
 
     # 3. Apply Spectral Transformation
     S_mod = S.clone()
-    if mode == 'ablate':
+    if mode == "ablate":
         # Remove the 'Experts' (top k)
         S_mod[:k] = 0.0
-    elif mode == 'rank-k':
+    elif mode == "rank-k":
         # Keep ONLY the 'Experts' (top k), zero the bulk
         S_mod[k:] = 0.0
     else:
@@ -133,14 +146,12 @@ def evaluate_spectral_perturbation(model, loader, layer_key, k, mode='ablate', d
             correct += (preds == lbls).sum().item()
             total += lbls.size(0)
 
-    return {
-        'layer': layer_key,
-        'k': k,
-        'mode': mode,
-        'accuracy': correct / total
-    }
+    return {"layer": layer_key, "k": k, "mode": mode, "accuracy": correct / total}
 
-def run_spectral_analysis(run_dir, config_path, layer_key, k_values, mode='ablate', device='cpu'):
+
+def run_spectral_analysis(
+    run_dir, config_path, layer_key, k_values, mode="ablate", device="cpu"
+):
     """
     Automated parent wrapper to run spectral perturbations on a specific experiment run.
 
@@ -155,32 +166,28 @@ def run_spectral_analysis(run_dir, config_path, layer_key, k_values, mode='ablat
 
     # 1. Load configuration and setup environment
     cfg = load_master_config(config_path)
-    data_cfg = cfg['data_config']
+    data_cfg = cfg["data_config"]
 
     # Resolve transforms and dataset class
-    dataset_class = get_dataset_class(data_cfg['dataset_name'])
-    data_cfg['transform'] = get_transform(data_cfg.get('transforms', []))
+    dataset_class = get_dataset_class(data_cfg["dataset_name"])
+    data_cfg["transform"] = get_transform(data_cfg.get("transforms", []))
 
     # 2. Setup Data Loader (Test set for evaluation)
-    is_omniglot = "Omniglot" in data_cfg['dataset_name']
-    test_key = 'background' if is_omniglot else 'train'
+    is_omniglot = "Omniglot" in data_cfg["dataset_name"]
+    test_key = "background" if is_omniglot else "train"
 
     loader = get_universal_loader(
-        dataset_class,
-        data_cfg,
-        **{test_key: False},
-        download=True,
-        root='./data'
+        dataset_class, data_cfg, **{test_key: False}, download=True, root="./data"
     )
 
     # 3. Instantiate and Load Model
-    m_args = cfg['model_params'].get('args', [])
-    m_kwargs = cfg['model_params'].get('kwargs', {})
-    model = model_factory(cfg['model_class'], *m_args, **m_kwargs)
+    m_args = cfg["model_params"].get("args", [])
+    m_kwargs = cfg["model_params"].get("kwargs", {})
+    model = model_factory(cfg["model_class"], *m_args, **m_kwargs)
 
     checkpoint_path = run_dir / "final_model.pth"
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    state_dict = checkpoint.get('model_state', checkpoint)
+    state_dict = checkpoint.get("model_state", checkpoint)
     model.load_state_dict(state_dict)
     model.to(device)
 
@@ -196,7 +203,8 @@ def run_spectral_analysis(run_dir, config_path, layer_key, k_values, mode='ablat
 
     return results
 
-def calculate_true_mle(weights_list, input_sample, activation='relu', device='cpu'):
+
+def calculate_true_mle(weights_list, input_sample, activation="relu", device="cpu"):
     """
     Calculates the True Maximal Lyapunov Exponent (MLE) by propagating a
     perturbation through the Jacobian chain.
@@ -214,9 +222,11 @@ def calculate_true_mle(weights_list, input_sample, activation='relu', device='cp
 
     # 2. Setup activation derivatives
     def get_phi_prime(h, mode):
-        if mode == 'relu': return (h > 0).float()
-        if mode == 'tanh': return 1.0 - torch.tanh(h)**2
-        if mode == 'sigmoid':
+        if mode == "relu":
+            return (h > 0).float()
+        if mode == "tanh":
+            return 1.0 - torch.tanh(h) ** 2
+        if mode == "sigmoid":
             s = torch.sigmoid(h)
             return s * (1.0 - s)
         return torch.ones_like(h)
@@ -253,12 +263,16 @@ def calculate_true_mle(weights_list, input_sample, activation='relu', device='cp
             q = z / (expansion + 1e-10)
 
             # Update x for the next layer's pre-activations
-            if activation == 'relu': x = torch.relu(h)
-            elif activation == 'tanh': x = torch.tanh(h)
-            else: x = torch.sigmoid(h)
+            if activation == "relu":
+                x = torch.relu(h)
+            elif activation == "tanh":
+                x = torch.tanh(h)
+            else:
+                x = torch.sigmoid(h)
 
     # Average log-expansion across the network depth
     return total_log_expansion / num_layers
+
 
 def spectral_kl_divergence(W_original, W_filtered, epsilon=1e-10):
     """
@@ -281,12 +295,17 @@ def spectral_kl_divergence(W_original, W_filtered, epsilon=1e-10):
 
     return kl_div.item()
 
-def run_spectral_scan(model, test_loader, layer_key_func,
-                      window_size_perc=0.1,
-                      kernel='uniform',
-                      num_centers=15,
-                      iterations=1,
-                      device='cpu'):
+
+def run_spectral_scan(
+    model,
+    test_loader,
+    layer_key_func,
+    window_size_perc=0.1,
+    kernel="uniform",
+    num_centers=15,
+    iterations=1,
+    device="cpu",
+):
     """
     Orchestrates a full spectral scan across different centers and kernel types.
 
@@ -299,9 +318,11 @@ def run_spectral_scan(model, test_loader, layer_key_func,
     half_win = window_size_perc / 2
     centers = np.linspace(half_win, 1.0 - half_win, num_centers)
 
-    original_weights = {n: m.weight.data.detach().clone()
-                        for n, m in model.named_modules()
-                        if isinstance(m, (nn.Linear, nn.Conv2d)) and layer_key_func(n)}
+    original_weights = {
+        n: m.weight.data.detach().clone()
+        for n, m in model.named_modules()
+        if isinstance(m, (nn.Linear, nn.Conv2d)) and layer_key_func(n)
+    }
 
     for c in centers:
         # 1. Generate the modified model using our parent function
@@ -311,7 +332,7 @@ def run_spectral_scan(model, test_loader, layer_key_func,
             layer_key_func,
             center_perc=c,
             window_size_perc=window_size_perc,
-            kernel_type=kernel
+            kernel_type=kernel,
         )
 
         # 2. KL Divergence Calculation (Spectral Info Loss)
@@ -331,23 +352,23 @@ def run_spectral_scan(model, test_loader, layer_key_func,
 
         # 3. Evaluate performance (Mean and Std)
         mean_acc, std_acc = evaluate_test_acc(
-            reconstructed_model,
-            test_loader,
-            num_iterations=iterations,
-            device=device
+            reconstructed_model, test_loader, num_iterations=iterations, device=device
         )
 
         # 4. Store the metadata for plotting
-        scan_results.append({
-            'center_perc': c,
-            'kernel_type': kernel,
-            'accuracy_mean': mean_acc,
-            'accuracy_std': std_acc,
-            'kl_divergence': mean_kl,
-            'window_size': window_size_perc
-        })
+        scan_results.append(
+            {
+                "center_perc": c,
+                "kernel_type": kernel,
+                "accuracy_mean": mean_acc,
+                "accuracy_std": std_acc,
+                "kl_divergence": mean_kl,
+                "window_size": window_size_perc,
+            }
+        )
 
     return pd.DataFrame(scan_results)
+
 
 def get_rmt_threshold_percentage(weight_tensor, broadener):
     """
@@ -360,7 +381,9 @@ def get_rmt_threshold_percentage(weight_tensor, broadener):
 
     # 2. Fit MP using the authors' official logic
     # We use range_of_y_to_fit=0.7 as per your provided code
-    a_fit, nuMin_fit, nuMax_fit, _ = fit_marcenkoPastur(nu, broadener, range_of_y_to_fit=0.7)
+    a_fit, nuMin_fit, nuMax_fit, _ = fit_marcenkoPastur(
+        nu, broadener, range_of_y_to_fit=0.7
+    )
 
     # 3. Find how many singular values are LARGER than the theoretical nuMax
     # Because SVD is sorted descending: [Outliers, Tail, nuMax, Bulk...]
@@ -372,10 +395,8 @@ def get_rmt_threshold_percentage(weight_tensor, broadener):
 """This section contains contains functions for random matrix theory (RMT) analysis. Adapted from 10.1103/PhysRevE.106.054124"""
 from typing import List, Tuple, Any, Union
 from abc import ABC, abstractmethod
-import copy
 from dataclasses import dataclass
 
-import numpy as np
 from numba import jit, prange
 from scipy.special import erf
 from scipy.optimize import curve_fit

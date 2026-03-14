@@ -13,6 +13,7 @@ from scipy.stats import levy_stable
 from pathlib import Path
 from copy import deepcopy
 
+
 class HookManager:
     def __init__(self):
         self.captured_output = None
@@ -32,7 +33,7 @@ class HookManager:
 
         # Navigate the model hierarchy to find the target module
         target_layer = model
-        for part in layer_path.split('.'):
+        for part in layer_path.split("."):
             if part.isdigit():
                 target_layer = target_layer[int(part)]
             else:
@@ -47,8 +48,10 @@ class HookManager:
             self._hook_handle.remove()
             self._hook_handle = None
 
+
 class TeeLogger:
     """Clones stdout to a file while still printing to terminal."""
+
     def __init__(self, filepath):
         self.terminal = sys.stdout
         self.log = open(filepath, "w")
@@ -65,6 +68,7 @@ class TeeLogger:
     def close(self):
         self.log.close()
 
+
 def get_hooked_features(model, hook_manager, imgs):
     # Trigger the forward pass
     # The hook inside the manager catches the data before the final activation
@@ -72,52 +76,55 @@ def get_hooked_features(model, hook_manager, imgs):
     # Flatten the captured pre-activation experts
     return torch.flatten(hook_manager.captured_output, 1)
 
+
 def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed) # for multi-GPU
+    torch.cuda.manual_seed_all(seed)  # for multi-GPU
 
     # Force CUDA to use deterministic algorithms (may be slightly slower)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
 
+
 def load_master_config(file_path):
     """
     Parses a master YAML and returns classes and all config sections.
     """
-    with open(file_path, 'r') as f:
+    with open(file_path, "r") as f:
         config = yaml.safe_load(f)
 
     # 1. Dynamic Class Resolution
-    model_name = config['model']['class_name']
+    model_name = config["model"]["class_name"]
     model_class = getattr(architectures, model_name)
 
-    optim_name = config['optimizer']['class_name']
+    optim_name = config["optimizer"]["class_name"]
     optim_class = getattr(optim, optim_name)
 
     # 2. Extract standard dictionaries
     # We return the whole 'config' so the script can access any custom sections
     return {
-        'model_class': model_class,
-        'optim_class': optim_class,
-        'model_params': config['model']['params'],
-        'optim_params': config['optimizer']['params'],
-        'data_config': config['data'],
-        'hyperparams': config['hyperparams'],
-        'full_config': config # The 'Extra Sections' are here
+        "model_class": model_class,
+        "optim_class": optim_class,
+        "model_params": config["model"]["params"],
+        "optim_params": config["optimizer"]["params"],
+        "data_config": config["data"],
+        "hyperparams": config["hyperparams"],
+        "full_config": config,  # The 'Extra Sections' are here
     }
+
 
 def get_universal_loader(dataset_class, data_config, **dataset_kwargs):
     """
     Universal wrapper that pulls settings from a data_config dictionary.
     """
     # Extract values from the config with defaults
-    batch_size = data_config.get('batch_size', 128)
-    use_gpu = data_config.get('use_gpu', True)
-    fast_load = data_config.get('fast_load', True)
-    transform = data_config.get('transform', None)
+    batch_size = data_config.get("batch_size", 128)
+    use_gpu = data_config.get("use_gpu", True)
+    fast_load = data_config.get("fast_load", True)
+    transform = data_config.get("transform", None)
 
     device = torch.device("cuda" if torch.cuda.is_available() and use_gpu else "cpu")
 
@@ -130,6 +137,7 @@ def get_universal_loader(dataset_class, data_config, **dataset_kwargs):
         first_item = dataset_raw[0][0]
         if not isinstance(first_item, torch.Tensor):
             from torchvision.transforms import ToTensor
+
             converter = ToTensor()
             imgs = torch.stack([converter(img) for img, _ in dataset_raw]).to(device)
         else:
@@ -140,24 +148,26 @@ def get_universal_loader(dataset_class, data_config, **dataset_kwargs):
             lbls = torch.tensor(dataset_raw._labels).to(device)
 
         dataset = TensorDataset(imgs, lbls)
-        loader = DataLoader(dataset, batch_size=batch_size,
-                            shuffle=dataset_kwargs.get('train', True))
+        loader = DataLoader(
+            dataset, batch_size=batch_size, shuffle=dataset_kwargs.get("train", True)
+        )
     else:
         loader = DataLoader(
             dataset_raw,
             batch_size=batch_size,
-            shuffle=dataset_kwargs.get('train', True),
+            shuffle=dataset_kwargs.get("train", True),
             num_workers=2,
-            pin_memory=True if torch.cuda.is_available() else False
+            pin_memory=True if torch.cuda.is_available() else False,
         )
 
     return loader
+
 
 def get_transform(transform_list):
     """Converts a list of dicts from YAML into a Compose object."""
     composed_list = []
     for item in transform_list:
-        (name, params), = item.items()
+        ((name, params),) = item.items()
         t_class = getattr(transforms, name)
 
         if params is None:
@@ -169,9 +179,11 @@ def get_transform(transform_list):
 
     return transforms.Compose(composed_list)
 
+
 def get_dataset_class(name):
     """Maps string names to torchvision dataset classes."""
     return getattr(datasets, name)
+
 
 def model_factory(model_class, *args, **kwargs):
     """
@@ -191,9 +203,13 @@ def model_factory(model_class, *args, **kwargs):
 
         # Verify it's actually a PyTorch module
         if not isinstance(model, nn.Module):
-            raise TypeError(f"The provided class {model_class.__name__} is not a torch.nn.Module.")
+            raise TypeError(
+                f"The provided class {model_class.__name__} is not a torch.nn.Module."
+            )
 
-        logging.info(f"Successfully initialized {model_class.__name__} with {len(args)} args and {len(kwargs)} kwargs.")
+        logging.info(
+            f"Successfully initialized {model_class.__name__} with {len(args)} args and {len(kwargs)} kwargs."
+        )
         return model
 
     except TypeError as e:
@@ -202,6 +218,7 @@ def model_factory(model_class, *args, **kwargs):
     except Exception as e:
         logging.error(f"Unexpected error initializing {model_class.__name__}: {e}")
         return None
+
 
 def optimizer_factory(optimizer_class, model_params, **kwargs):
     """
@@ -230,6 +247,7 @@ def optimizer_factory(optimizer_class, model_params, **kwargs):
         logging.error(f"Failed to initialize optimizer {optimizer_class.__name__}: {e}")
         return None
 
+
 def init_heavy_tailed(tensor, alpha, g, seed_offset=0, base_seed=0):
     """
     Overwrites a tensor's data with heavy-tailed weights using per-layer seeds.
@@ -239,18 +257,21 @@ def init_heavy_tailed(tensor, alpha, g, seed_offset=0, base_seed=0):
         if tensor.dim() == 4:  # Conv layer
             n_eff = tensor.shape[1] * tensor.shape[2] * tensor.shape[3]
         else:  # Linear layer
-            n_eff = (tensor.shape[0] * tensor.shape[1])**0.5
+            n_eff = (tensor.shape[0] * tensor.shape[1]) ** 0.5
 
         # 2. Localized Seed: ensures unique outlier placement per layer
         # This prevents correlated 'super-paths' through the network depth.
         local_rng = np.random.RandomState(base_seed + seed_offset)
 
         # 3. Generate stable samples with the local RNG
-        scale = g / (2 * n_eff)**(1/alpha)
-        samples = levy_stable.rvs(alpha, 0, scale=scale, size=tensor.shape, random_state=local_rng)
+        scale = g / (2 * n_eff) ** (1 / alpha)
+        samples = levy_stable.rvs(
+            alpha, 0, scale=scale, size=tensor.shape, random_state=local_rng
+        )
 
         # 4. Copy to PyTorch
         tensor.copy_(torch.from_numpy(samples).float())
+
 
 def apply_heavy_tailed_init(model, alpha, g, base_seed=0):
     """
@@ -261,15 +282,18 @@ def apply_heavy_tailed_init(model, alpha, g, base_seed=0):
         # Dedicated counter ensures seed consistency across different model types
         weight_idx = 0
         for name, param in model.named_parameters():
-            if 'weight' in name and param.dim() >= 2:
+            if "weight" in name and param.dim() >= 2:
                 # Use Fan-in (input dimension) for more stable HT scaling
                 # n_eff = param.shape[1]
-                init_heavy_tailed(param, alpha, g, seed_offset=weight_idx, base_seed=base_seed)
+                init_heavy_tailed(
+                    param, alpha, g, seed_offset=weight_idx, base_seed=base_seed
+                )
                 weight_idx += 1
-            elif 'bias' in name:
+            elif "bias" in name:
                 # Heavy tails work best when centered at zero
                 param.zero_()
     return model
+
 
 def get_layer_from_checkpoint(model_path, layer_key):
     """
@@ -280,11 +304,11 @@ def get_layer_from_checkpoint(model_path, layer_key):
         layer_key (str): The state_dict key (e.g., 'features.0.weight').
     """
     # Load to CPU to avoid filling up VRAM during analysis
-    checkpoint = torch.load(model_path, map_location='cpu')
+    checkpoint = torch.load(model_path, map_location="cpu")
 
     # Handle the nested 'model_state' or 'model_state_dict' structure
     # common in your ml_library.py exports
-    state_dict = checkpoint.get('model_state', checkpoint)
+    state_dict = checkpoint.get("model_state", checkpoint)
 
     if layer_key not in state_dict:
         available = list(state_dict.keys())
@@ -292,29 +316,34 @@ def get_layer_from_checkpoint(model_path, layer_key):
 
     return state_dict[layer_key].detach().float()
 
-def setup_experiment(config_path, checkpoint_path=None, device='cpu'):
+
+def setup_experiment(config_path, checkpoint_path=None, device="cpu"):
     """
     Standardizes model and data loading using the project's factory
     and configuration structures.
     """
     # 1. Load Master Configuration
     cfg = load_master_config(config_path)
-    data_cfg = cfg['data_config']
-    model_params = cfg['model_params']
-    model_input = cfg['model_class']
+    data_cfg = cfg["data_config"]
+    model_params = cfg["model_params"]
+    model_input = cfg["model_class"]
 
     # 2. Setup Data (Transforms & Loaders)
-    dataset_class = get_dataset_class(data_cfg['dataset_name'])
-    data_cfg['transform'] = get_transform(data_cfg.get('transforms', []))
+    dataset_class = get_dataset_class(data_cfg["dataset_name"])
+    data_cfg["transform"] = get_transform(data_cfg.get("transforms", []))
 
     loaders = {
-        'train': get_universal_loader(dataset_class, data_cfg, train=True, download=True, root='./data'),
-        'test': get_universal_loader(dataset_class, data_cfg, train=False, download=True, root='./data')
+        "train": get_universal_loader(
+            dataset_class, data_cfg, train=True, download=True, root="./data"
+        ),
+        "test": get_universal_loader(
+            dataset_class, data_cfg, train=False, download=True, root="./data"
+        ),
     }
 
     # 3. Flexible Model Acquisition (Factory Path)
-    m_args = model_params.get('args', [])
-    m_kwargs = model_params.get('kwargs', {})
+    m_args = model_params.get("args", [])
+    m_kwargs = model_params.get("kwargs", {})
 
     # Initialize using your existing factory logic
     model = model_factory(model_input, *m_args, **m_kwargs)
@@ -328,14 +357,17 @@ def setup_experiment(config_path, checkpoint_path=None, device='cpu'):
     if checkpoint_path:
         checkpoint = torch.load(checkpoint_path, map_location=device)
         # Handle state_dict unpacking (supports bfp16 or full precision)
-        state_dict = checkpoint.get('model_state', checkpoint)
+        state_dict = checkpoint.get("model_state", checkpoint)
         model.load_state_dict(state_dict)
-        model.eval() # Set to evaluation mode for consistent metrics
+        model.eval()  # Set to evaluation mode for consistent metrics
         print(f"Successfully loaded checkpoint: {Path(checkpoint_path).name}")
 
     return model, loaders, cfg
 
-def spectral_filter(weight_tensor, center_perc, window_size_perc, kernel_type='uniform'):
+
+def spectral_filter(
+    weight_tensor, center_perc, window_size_perc, kernel_type="uniform"
+):
     """
     Isolates a window of singular values using either a Rectangular or Gaussian filter.
     The window_size_perc represents the FWHM for Gaussian kernels.
@@ -345,19 +377,21 @@ def spectral_filter(weight_tensor, center_perc, window_size_perc, kernel_type='u
     num_s = len(S)
     rank_axis = torch.linspace(0, 1, steps=num_s).to(S.device)
 
-    if kernel_type == 'uniform':
+    if kernel_type == "uniform":
         # Hard cutoff: 1.0 within [center - width/2, center + width/2]
         half_width = window_size_perc / 2
-        mask = ((rank_axis >= center_perc - half_width) &
-                (rank_axis <= center_perc + half_width)).float()
+        mask = (
+            (rank_axis >= center_perc - half_width)
+            & (rank_axis <= center_perc + half_width)
+        ).float()
 
-    elif kernel_type == 'gaussian':
+    elif kernel_type == "gaussian":
         # Gaussian filter where FWHM = window_size_perc
         # Relationship: sigma = FWHM / (2 * sqrt(2 * ln(2)))
         sigma = window_size_perc / (2 * np.sqrt(2 * np.log(2)))
 
         # We use the standard Gaussian form: exp(-(x - mu)^2 / (2 * sigma^2))
-        mask = torch.exp(-((rank_axis - center_perc)**2) / (2 * sigma**2))
+        mask = torch.exp(-((rank_axis - center_perc) ** 2) / (2 * sigma**2))
 
     else:
         raise ValueError(f"Unknown kernel type: {kernel_type}")
@@ -366,7 +400,10 @@ def spectral_filter(weight_tensor, center_perc, window_size_perc, kernel_type='u
     S_filtered = S * mask
     return U @ torch.diag(S_filtered) @ Vh
 
-def apply_spectral_filter_to_model(model, layer_key_func, center_perc, window_size_perc, kernel_type='uniform'):
+
+def apply_spectral_filter_to_model(
+    model, layer_key_func, center_perc, window_size_perc, kernel_type="uniform"
+):
     """
     Applies spectral reconstruction to specific layers of a model.
 
@@ -383,9 +420,9 @@ def apply_spectral_filter_to_model(model, layer_key_func, center_perc, window_si
     """
     # Create a deep copy to avoid mutating the original model in the loop
     altered_model = deepcopy(model)
-    altered_model.eval() # Ensure eval mode for consistent behavior
+    altered_model.eval()  # Ensure eval mode for consistent behavior
 
-    with torch.no_grad(): # No gradients needed for reconstruction analysis
+    with torch.no_grad():  # No gradients needed for reconstruction analysis
         for name, module in altered_model.named_modules():
             if isinstance(module, (nn.Linear, nn.Conv2d)) and layer_key_func(name):
                 # 1. Access the raw weight tensor
@@ -394,10 +431,7 @@ def apply_spectral_filter_to_model(model, layer_key_func, center_perc, window_si
                 # 2. Call your 'Atomic' math function from equations.py
                 # This performs the SVD, filtering, and reconstruction
                 W_filtered = spectral_filter(
-                    W_orig,
-                    center_perc,
-                    window_size_perc,
-                    kernel_type=kernel_type
+                    W_orig, center_perc, window_size_perc, kernel_type=kernel_type
                 )
 
                 # 3. Replace the weights in-place
@@ -405,7 +439,8 @@ def apply_spectral_filter_to_model(model, layer_key_func, center_perc, window_si
 
     return altered_model
 
-def evaluate_test_acc(model, test_loader, num_iterations=1, device='cpu'):
+
+def evaluate_test_acc(model, test_loader, num_iterations=1, device="cpu"):
     """
     Evaluates the model performance over multiple iterations.
     """

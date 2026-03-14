@@ -2,17 +2,22 @@ import torch.nn as nn
 import torch
 import matplotlib.pyplot as plt
 
+
 class GeneralMLP(nn.Module):
-    def __init__(self, input_size, hidden_size, num_classes, depth,
-                 activation_name='tanh', bias=True, dropout_p=0.0):
+    def __init__(
+        self,
+        input_size,
+        hidden_size,
+        num_classes,
+        depth,
+        activation_name="tanh",
+        bias=True,
+        dropout_p=0.0,
+    ):
         super(GeneralMLP, self).__init__()
 
         # Mapping string to PyTorch activation modules
-        activations = {
-            'tanh': nn.Tanh,
-            'relu': nn.ReLU,
-            'sigmoid': nn.Sigmoid
-        }
+        activations = {"tanh": nn.Tanh, "relu": nn.ReLU, "sigmoid": nn.Sigmoid}
         activation = activations.get(activation_name.lower(), nn.Tanh)
 
         layers = []
@@ -47,17 +52,22 @@ class GeneralMLP(nn.Module):
         x = x.view(x.size(0), -1)
         return self.features(x)
 
+
 class GeneralCNN(nn.Module):
-    def __init__(self, input_channels, base_channels, num_classes, depth,
-                 activation_name='tanh', dropout_p=0.5, bias=False):
+    def __init__(
+        self,
+        input_channels,
+        base_channels,
+        num_classes,
+        depth,
+        activation_name="tanh",
+        dropout_p=0.5,
+        bias=False,
+    ):
         super(GeneralCNN, self).__init__()
 
         # 1. Setup Activations
-        activations = {
-            'tanh': nn.Tanh,
-            'relu': nn.ReLU,
-            'sigmoid': nn.Sigmoid
-        }
+        activations = {"tanh": nn.Tanh, "relu": nn.ReLU, "sigmoid": nn.Sigmoid}
         activation = activations.get(activation_name.lower(), nn.Tanh)
 
         layers = []
@@ -66,8 +76,11 @@ class GeneralCNN(nn.Module):
 
         # 2. Build Convolutional Feature Extractor
         for i in range(depth):
-            layers.append(nn.Conv2d(current_channels, out_channels,
-                                    kernel_size=3, padding=1, bias=bias))
+            layers.append(
+                nn.Conv2d(
+                    current_channels, out_channels, kernel_size=3, padding=1, bias=bias
+                )
+            )
             layers.append(activation())
             layers.append(nn.MaxPool2d(2))
             current_channels = out_channels
@@ -80,8 +93,8 @@ class GeneralCNN(nn.Module):
         # We calculate the flattening dimension based on 28x28 input
         # Each MaxPool(2) halves the H and W. For 28x28:
         # depth 1 -> 14x14 | depth 2 -> 7x7 | depth 3 -> 3x3
-        spatial_dim = 28 // (2 ** depth)
-        flatten_dim = current_channels * (spatial_dim ** 2)
+        spatial_dim = 28 // (2**depth)
+        flatten_dim = current_channels * (spatial_dim**2)
 
         self.classifier = nn.Linear(flatten_dim, num_classes, bias=bias)
 
@@ -94,6 +107,7 @@ class GeneralCNN(nn.Module):
         x = self.get_features(x)
         x = self.dropout(x)
         return self.classifier(x)
+
 
 class ResearchCNN(GeneralCNN):
     def __init__(self, *args, **kwargs):
@@ -112,15 +126,16 @@ class ResearchCNN(GeneralCNN):
         self.features = nn.Sequential(*all_layers)
 
         # Recalculate dimensions: Spatial size is doubled compared to parent
-        depth = kwargs.get('depth')
+        depth = kwargs.get("depth")
         spatial_dim = 28 // (2 ** (depth - 1))
 
         # Find the last channel count from the final conv layer in our new list
         last_conv = [m for m in all_layers if isinstance(m, nn.Conv2d)][-1]
-        flatten_dim = last_conv.out_channels * (spatial_dim ** 2)
+        flatten_dim = last_conv.out_channels * (spatial_dim**2)
 
-        self.classifier = nn.Linear(flatten_dim, kwargs.get('num_classes'),
-                                    bias=kwargs.get('bias', False))
+        self.classifier = nn.Linear(
+            flatten_dim, kwargs.get("num_classes"), bias=kwargs.get("bias", False)
+        )
 
     def get_features(self, x):
         """
@@ -152,13 +167,14 @@ class ResearchCNN(GeneralCNN):
         x = self.dropout(x)
         return self.classifier(x)
 
+
 if __name__ == "__main__":
     # 1. Initialize two models for comparison
     alpha_val = 1.2
     g_val = 1.0
 
     model_ht = CleanCNN(alpha=alpha_val, g=g_val)
-    model_gauss = CleanCNN(alpha=2.0, g=g_val) # Alpha=2.0 is exactly Gaussian
+    model_gauss = CleanCNN(alpha=2.0, g=g_val)  # Alpha=2.0 is exactly Gaussian
 
     # 2. Extract weights from the first layer
     # features[0] is the first Conv2d layer
@@ -169,15 +185,31 @@ if __name__ == "__main__":
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 
     # Left: Linear scale histogram (The "Spike and Tail" view)
-    axes[0].hist(w_ht, bins=100, color='crimson', alpha=0.6, label=f'Heavy-Tailed (α={alpha_val})', density=True)
-    axes[0].hist(w_gauss, bins=100, color='gray', alpha=0.4, label='Gaussian (α=2.0)', density=True)
+    axes[0].hist(
+        w_ht,
+        bins=100,
+        color="crimson",
+        alpha=0.6,
+        label=f"Heavy-Tailed (α={alpha_val})",
+        density=True,
+    )
+    axes[0].hist(
+        w_gauss,
+        bins=100,
+        color="gray",
+        alpha=0.4,
+        label="Gaussian (α=2.0)",
+        density=True,
+    )
     axes[0].set_title("Weight Distribution (Linear Scale)")
-    axes[0].set_yscale('log') # Log scale on Y is essential to see the tails
+    axes[0].set_yscale("log")  # Log scale on Y is essential to see the tails
     axes[0].legend()
 
     # Right: The "Outlier" scatter (The "Fractal" view)
     # This shows the magnitude of weights across the flattened index
-    axes[1].scatter(range(len(w_ht)), w_ht, s=1, color='crimson', alpha=0.5, label='HT Weights')
+    axes[1].scatter(
+        range(len(w_ht)), w_ht, s=1, color="crimson", alpha=0.5, label="HT Weights"
+    )
     axes[1].set_title("Weight Magnitudes (Outlier Check)")
     axes[1].set_ylabel("Weight Value")
     axes[1].legend()
@@ -187,5 +219,9 @@ if __name__ == "__main__":
 
     # 4. Print Summary Statistics
     print(f"--- Initialization Check ---")
-    print(f"HT Layer 1 - Max: {w_ht.max():.4f}, Min: {w_ht.min():.4f}, Std: {w_ht.std():.4f}")
-    print(f"Gaussian Layer 1 - Max: {w_gauss.max():.4f}, Min: {w_gauss.min():.4f}, Std: {w_gauss.std():.4f}")
+    print(
+        f"HT Layer 1 - Max: {w_ht.max():.4f}, Min: {w_ht.min():.4f}, Std: {w_ht.std():.4f}"
+    )
+    print(
+        f"Gaussian Layer 1 - Max: {w_gauss.max():.4f}, Min: {w_gauss.min():.4f}, Std: {w_gauss.std():.4f}"
+    )

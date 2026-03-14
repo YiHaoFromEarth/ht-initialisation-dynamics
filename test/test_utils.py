@@ -3,22 +3,27 @@ import numpy as np
 import pytest
 from scipy.stats import levy_stable
 from torch import nn
-from src.utils import init_heavy_tailed, apply_heavy_tailed_init, setup_experiment, spectral_filter
+from src.utils import (
+    init_heavy_tailed,
+    apply_heavy_tailed_init,
+    setup_experiment,
+    spectral_filter,
+)
 from src.architectures import GeneralMLP
 from pathlib import Path
+
 
 class ToyModel(nn.Module):
     def __init__(self):
         super().__init__()
         self.conv = nn.Conv2d(1, 10, kernel_size=3)
         self.fc = nn.Linear(10, 5)
-        self.nested = nn.Sequential(
-            nn.Linear(5, 2)
-        )
-        self.non_param = nn.Tanh() # Should be ignored by init
+        self.nested = nn.Sequential(nn.Linear(5, 2))
+        self.non_param = nn.Tanh()  # Should be ignored by init
 
     def forward(self, x):
         return self.nested(self.fc(self.conv(x)))
+
 
 def test_alpha_fit():
     """Verify that the generated weights converge to the requested alpha."""
@@ -37,18 +42,25 @@ def test_alpha_fit():
     # We fix beta (f1) to 0 and location (f2) to 0.
     # Some scipy versions prefer keyword arguments like floc and fscale.
     # This syntax fixes beta=0 and loc=0.
-    alpha_fit, beta_fit, loc_fit, scale_fit = levy_stable.fit(downsampled_data, fbeta=0, floc=0)
+    alpha_fit, beta_fit, loc_fit, scale_fit = levy_stable.fit(
+        downsampled_data, fbeta=0, floc=0
+    )
 
     # Assert alpha is within a reasonable tolerance (stochastic margin)
-    assert np.isclose(alpha_fit, alpha_req, atol=0.05), f"Alpha fit {alpha_fit} deviated from {alpha_req}"
+    assert np.isclose(alpha_fit, alpha_req, atol=0.05), (
+        f"Alpha fit {alpha_fit} deviated from {alpha_req}"
+    )
     print(f"\nRequested alpha: {alpha_req}, Fitted alpha: {alpha_fit:.3f}")
 
-    n_eff = (tensor.shape[0] * tensor.shape[1])**0.5
-    expected_scale = g_req / (2 * n_eff)**(1/alpha_req)
+    n_eff = (tensor.shape[0] * tensor.shape[1]) ** 0.5
+    expected_scale = g_req / (2 * n_eff) ** (1 / alpha_req)
 
     # Assert g is within a reasonable tolerance (stochastic margin)
-    assert np.isclose(scale_fit, expected_scale, rtol=0.1), f"Scale fit {scale_fit} deviated from expected {expected_scale}"
+    assert np.isclose(scale_fit, expected_scale, rtol=0.1), (
+        f"Scale fit {scale_fit} deviated from expected {expected_scale}"
+    )
     print(f"Expected scale: {expected_scale:.4f}, Fitted scale: {scale_fit:.4f}")
+
 
 def test_scaling_logic():
     """Verify that the scale parameter adjusts correctly for different layer sizes."""
@@ -66,8 +78,11 @@ def test_scaling_logic():
 
     # In HT distributions, larger N_eff leads to a smaller scale (1/N_eff^(1/alpha))
     # Therefore, the standard deviation (or dispersion) should be smaller for larger tensors
-    assert std_large < std_small, "Scaling logic failed: larger layers should have smaller per-entry scales."
+    assert std_large < std_small, (
+        "Scaling logic failed: larger layers should have smaller per-entry scales."
+    )
     print(f"\nSmall tensor std: {std_small:.3f}, Large tensor std: {std_large:.3f}")
+
 
 def test_reproducibility_and_offset():
     """Ensure that the same seed/offset produces the same weights, and different ones don't."""
@@ -82,7 +97,10 @@ def test_reproducibility_and_offset():
     init_heavy_tailed(t3, 1.2, 0.5, seed_offset=11, base_seed=100)
 
     assert torch.equal(t1, t2), "Identical seeds failed to produce identical weights."
-    assert not torch.equal(t1, t3), "Different seed_offsets produced identical weights (collision)."
+    assert not torch.equal(t1, t3), (
+        "Different seed_offsets produced identical weights (collision)."
+    )
+
 
 def test_apply_init_coverage():
     """Verify that all parametric layers are modified from their default init."""
@@ -97,9 +115,16 @@ def test_apply_init_coverage():
     apply_heavy_tailed_init(model, alpha=1.2, g=0.5, base_seed=123)
 
     # Assert that weights have changed
-    assert not torch.equal(model.conv.weight, original_conv), "Conv layer was not initialized."
-    assert not torch.equal(model.fc.weight, original_fc), "FC layer was not initialized."
-    assert not torch.equal(model.nested[0].weight, original_nested), "Nested Linear layer was not initialized."
+    assert not torch.equal(model.conv.weight, original_conv), (
+        "Conv layer was not initialized."
+    )
+    assert not torch.equal(model.fc.weight, original_fc), (
+        "FC layer was not initialized."
+    )
+    assert not torch.equal(model.nested[0].weight, original_nested), (
+        "Nested Linear layer was not initialized."
+    )
+
 
 def test_layer_uniqueness():
     """Verify that different layers get different weight values (seed_offset check)."""
@@ -111,8 +136,10 @@ def test_layer_uniqueness():
     apply_heavy_tailed_init(model, alpha=1.2, g=0.5, base_seed=99)
 
     # If the seed_offset is working, these identical shapes should have unique values
-    assert not torch.equal(model.layer_a.weight, model.layer_b.weight), \
+    assert not torch.equal(model.layer_a.weight, model.layer_b.weight), (
         "Layers share identical weights! Check your seed_offset logic."
+    )
+
 
 def test_deterministic_model_init():
     """Verify that a fixed base_seed produces the exact same model every time."""
@@ -123,7 +150,10 @@ def test_deterministic_model_init():
     apply_heavy_tailed_init(model2, alpha=1.2, g=0.5, base_seed=42)
 
     for p1, p2 in zip(model1.parameters(), model2.parameters()):
-        assert torch.equal(p1, p2), "Model init is not deterministic for the same base_seed."
+        assert torch.equal(p1, p2), (
+            "Model init is not deterministic for the same base_seed."
+        )
+
 
 def test_setup_from_yaml():
     """
@@ -134,7 +164,9 @@ def test_setup_from_yaml():
     config_path = current_dir / "test_config.yaml"
 
     # 1. Run the setup
-    model, loaders, cfg = setup_experiment(config_path, device='cuda' if torch.cuda.is_available() else 'cpu')
+    model, loaders, cfg = setup_experiment(
+        config_path, device="cuda" if torch.cuda.is_available() else "cpu"
+    )
 
     # 2. Structural Assertions
     assert isinstance(model, GeneralMLP), "Model should be an instance of GeneralMLP"
@@ -142,34 +174,41 @@ def test_setup_from_yaml():
     # Check if the kwargs were respected (Hidden Size 784, Depth 3)
     # We check the features sequence length
     linear_layers = [l for l in model.features if isinstance(l, torch.nn.Linear)]
-    assert len(linear_layers) == 3, f"Expected 3 hidden layers, got {len(linear_layers)}"
+    assert len(linear_layers) == 3, (
+        f"Expected 3 hidden layers, got {len(linear_layers)}"
+    )
     assert linear_layers[0].out_features == 784, "Hidden size should be 784"
     assert linear_layers[0].bias is None, "Bias should be False as per config"
 
     # 3. Data Pipeline Assertions
-    assert "train" in loaders and "test" in loaders, "Loaders dictionary must contain train and test"
+    assert "train" in loaders and "test" in loaders, (
+        "Loaders dictionary must contain train and test"
+    )
 
     # Verify the batch size from config (128)
-    assert loaders['test'].batch_size == 128, "Batch size should match the data_config"
+    assert loaders["test"].batch_size == 128, "Batch size should match the data_config"
 
     # Verify the dataset (MNIST)
-    assert cfg['data_config']['dataset_name'] == "MNIST", "Config should specify MNIST"
+    assert cfg["data_config"]["dataset_name"] == "MNIST", "Config should specify MNIST"
 
     # 4. Input Forward Pass Check (The "Sanity Check")
     # Grab one batch and see if it flows through the model
-    images, labels = next(iter(loaders['test']))
+    images, labels = next(iter(loaders["test"]))
     try:
         output = model(images)
-        assert output.shape == (128, 10), f"Expected output shape (128, 10), got {output.shape}"
+        assert output.shape == (128, 10), (
+            f"Expected output shape (128, 10), got {output.shape}"
+        )
     except Exception as e:
         pytest.fail(f"Forward pass failed with error: {e}")
+
 
 def test_uniform_filter_logic():
     size = 100
     W = torch.eye(size)
     center, width = 0.5, 0.2
 
-    W_filtered = spectral_filter(W, center, width, kernel_type='uniform')
+    W_filtered = spectral_filter(W, center, width, kernel_type="uniform")
 
     # Check diagonal values directly - they should be exactly 1.0 or 0.0
     # because W was Identity. No SVD sorting to worry about here.
@@ -180,12 +219,13 @@ def test_uniform_filter_logic():
     assert torch.all(diag[:35] == 0.0)
     assert torch.all(diag[65:] == 0.0)
 
+
 def test_gaussian_fwhm_logic():
     size = 1000
     W = torch.eye(size)
     center, width = 0.5, 0.1
 
-    W_filtered = spectral_filter(W, center, width, kernel_type='gaussian')
+    W_filtered = spectral_filter(W, center, width, kernel_type="gaussian")
     diag = torch.diag(W_filtered)
 
     # The center (index 500) must be 1.0
@@ -194,6 +234,7 @@ def test_gaussian_fwhm_logic():
     # The FWHM points (approx index 450 and 550) must be around 0.5
     assert torch.isclose(diag[450], torch.tensor(0.5), atol=1e-2)
     assert torch.isclose(diag[550], torch.tensor(0.5), atol=1e-2)
+
 
 if __name__ == "__main__":
     # Allows running the test directly via 'python test_setup.py'
