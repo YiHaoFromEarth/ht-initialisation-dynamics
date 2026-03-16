@@ -401,7 +401,7 @@ def train_model_ht(
 
                 history.append(metrics)
                 sys.stdout.log.write(
-                    f"Epoch {epoch} | Train Acc: {metrics['train_acc']:.4f} | Test Acc: {metrics['test_acc']:.4f}"
+                    f"Epoch {epoch} | Train Acc: {metrics['train_acc']:.4f} | Test Acc: {metrics['test_acc']:.4f}\n"
                 )
                 sys.stdout.log.flush()
 

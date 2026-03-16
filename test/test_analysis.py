@@ -3,6 +3,7 @@ import torch.nn as nn
 import numpy as np
 import os
 import yaml
+import pytest
 from torch.utils.data import DataLoader, TensorDataset
 from pathlib import Path
 from src.utils import get_layer_from_checkpoint
@@ -11,6 +12,7 @@ from src.analysis import (
     get_layer_fingerprint,
     evaluate_spectral_perturbation,
     run_spectral_analysis,
+    hill_estimator,
 )
 
 
@@ -221,3 +223,45 @@ def test_wrapper_integration():
         for file in run_dir.glob("*"):
             os.remove(file)
         run_dir.rmdir()
+
+
+def test_hill_toy_example():
+    """Test using the toy list we manually calculated."""
+    # Data: [0.1, 0.2, 0.5, 0.8, 1.2, 2.5, 5.0, 12.0, 45.0, 150.0]
+    # Sorted: 150, 45, 12, 5, ...
+    # k=3 (top 10%), threshold = 5
+    toy_weights = [0.1, 0.2, 0.5, 0.8, 1.2, 2.5, 5.0, 12.0, 45.0, 150.0]
+
+    # k_percent=0.3 to force k=3
+    alpha = hill_estimator(toy_weights, k_percent=0.3)
+
+    # Manual calc: 1/((ln(30)+ln(9)+ln(2.4))/3) approx 0.463
+    assert alpha == pytest.approx(0.463, rel=1e-3)
+
+
+def test_hill_pareto_distribution():
+    """Test with a true Power Law (Pareto) where alpha is known."""
+    np.random.seed(42)
+    true_alpha = 1.5
+    # Pareto distribution in numpy: samples = (np.random.pareto(a) + 1) * scale
+    # The 'a' in numpy's pareto is the same as our tail index alpha
+    samples = np.random.pareto(true_alpha, size=10000) + 1
+
+    # For a large sample, 1% tail should be quite accurate
+    estimated_alpha = hill_estimator(samples, k_percent=0.01)
+
+    # Allow 10% relative error due to stochastic sampling
+    assert estimated_alpha == pytest.approx(true_alpha, rel=0.1)
+
+
+def test_hill_normal_distribution():
+    """Test that Gaussian weights result in a high alpha (thin tails)."""
+    np.random.seed(42)
+    # Normal distribution has exponential tails, so Hill alpha should be large
+    samples = np.random.normal(0, 1, size=10000)
+
+    estimated_alpha = hill_estimator(samples, k_percent=0.01)
+
+    # Alpha for a Normal distribution usually estimates > 2 or 3
+    # as k -> 0, signifying it is not heavy-tailed.
+    assert estimated_alpha > 2.0

@@ -1,0 +1,48 @@
+experiment_metadata:
+  name: "Testing Ordered Runs"
+  output_root: "./ordered_test"
+  comment: >
+    MNIST Sweep showed divergence from Qu et al. 2022 for sigma = 0.5 runs with higher accuracy and better convergence
+    Testing with more seeds to see if real or fluke
+
+model:
+  class_name: "GeneralMLP"
+  params:
+    kwargs:
+      input_size: 784
+      hidden_size: 784
+      num_classes: 10
+      depth: 9
+      activation_name: "tanh"
+      bias: False
+
+optimizer:
+  class_name: "SGD"
+  params:
+    lr: 0.001
+    momentum: 0.0
+    weight_decay: 0.0
+
+data:
+  dataset_name: "MNIST"
+  batch_size: 1024
+  use_gpu: true
+  fast_load: true
+  transforms:
+    - ToTensor: null
+    - Normalize:
+        mean: [0.1307]
+        std: [0.3081]
+
+heavy_tail:
+  enabled: true
+  alpha: 2.0
+  g: 0.5
+
+hyperparams:
+  epochs: 650
+  seed: 0
+  log_freq: 1
+  device: "cuda"
+  save_weights_history: true
+  weight_log_epochs: [0, 1, 2, 3, 4, 6, 8, 10, 15, 20, 30, 40, 50, 75, 100, 125, 150, 200, 250, 300, 400, 500, 550, 600]

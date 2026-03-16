@@ -3,6 +3,9 @@ import torch.nn as nn
 import numpy as np
 import copy
 import pandas as pd
+import json
+import re
+import gc
 from pathlib import Path
 from scipy.optimize import curve_fit
 from .utils import (
@@ -28,66 +31,171 @@ def get_singular_values(matrix):
     return s.detach().cpu().numpy()
 
 
-def get_layer_fingerprint(W_init, W_final):
+def get_layer_fingerprint(W):
     """
-    Calculates fundamental spectral and dynamical metrics for a weight layer.
-
-    Args:
-        W_init (torch.Tensor): Weights at epoch 0.
-        W_final (torch.Tensor): Weights at the target epoch.
+    Modular fingerprinting for a single weight matrix.
+    Add any new metric by simply adding a key-value pair to the dict.
     """
-    # 1. Ensure tensors are on CPU and float
-    W_0 = W_init.detach().cpu().float()
-    W_t = W_final.detach().cpu().float()
+    # 1. Standardize to float32 NumPy for the basic metrics
+    if torch.is_tensor(W):
+        W_torch = W.detach().cpu().float()
+        W_flat = W_torch.numpy().flatten()
+    else:
+        W_flat = W.flatten()
+        W_torch = torch.from_numpy(W).float()
 
-    # 2. Singular Value Decomposition
-    U_0, S_0, V_0 = torch.svd(W_0)
-    U_t, S_t, V_t = torch.svd(W_t)
+    # --- EXTENSIBLE METRIC SECTION ---
+    # You can add new metrics here easily.
+    fingerprint = {
+        "alpha": hill_estimator(W_flat, k_percent=0.01),
+        "frobenius": np.linalg.norm(W_flat),
 
-    # Relative Frobenius Displacement (Distance Traveled)
-    # Proves the "Frozen" vs "Rich" regimes
-    displacement = torch.norm(W_t - W_0) / torch.norm(W_0)
-
-    # Effective Rank (Stable Rank)
-    # Measures dimensionality/utility of the width
-    eff_rank = (torch.sum(S_t**2)) / (S_t[0] ** 2)
-
-    # Inverse Participation Ratio (IPR) of Top Vector
-    # Measures localization (Spiky vs. Distributed)
-    v_top = V_t[:, 0]
-    ipr = torch.sum(v_top**4) / (torch.sum(v_top**2) ** 2)
-
-    # Participation Ratio of Singular Values
-    # Measures how 'flat' the eigenvalue distribution is
-    part_ratio = (torch.sum(S_t) ** 2) / (len(S_t) * torch.sum(S_t**2))
-
-    # Get singular values
-    s = torch.linalg.svdvals(W_t.detach().float())
-    s2 = s**2
-    p = s2 / s2.sum()  # Normalized power
-
-    # 1. Hill Estimator (Simplified)
-    # We look at the top 10% of singular values to estimate the tail
-    k = max(int(len(s) * 0.1), 5)
-    s_top = s[:k]
-    hill = 1.0 / (torch.log(s_top / s_top[-1]).mean())
-
-    # 2. Raw Spectral Entropy
-    entropy = -torch.sum(p * torch.log(p + 1e-10))
-
-    # 3. Dominance Ratio
-    dominance = s[0] / s.sum()
-
-    return {
-        "displacement": displacement.item(),
-        "effective_rank": eff_rank.item(),
-        "ipr": ipr.item(),
-        "participation_ratio": part_ratio.item(),
-        "max_singular_val": S_t[0].item(),
-        "hill_alpha": hill.item(),
-        "spectral_entropy": entropy.item(),
-        "dominance_ratio": dominance.item(),
+        # Example of how to add more:
+        # "mean": np.mean(W_flat),
+        # "std": np.std(W_flat),
     }
+
+    return fingerprint
+
+
+def hill_estimator(weights, k_percent=0.01):
+    if torch.is_tensor(weights):
+        weights = weights.to(torch.float32).detach().cpu().numpy()
+
+    # Take absolute values and sort descending
+    w_sorted = np.sort(np.abs(weights))[::-1]
+
+    # Select top k entries
+    k = int(len(w_sorted) * k_percent)
+    if k < 2:
+        return np.nan
+
+    # Hill formula
+    log_diffs = np.log(w_sorted[:k] / w_sorted[k])
+    xi = np.mean(log_diffs)
+
+    return 1 / xi if xi > 0 else np.inf
+
+
+def get_hill_plot(weights, max_k_fraction=0.1, min_k=10):
+    # 1. Standardize and Flatten
+    if torch.is_tensor(weights):
+        weights = weights.to(torch.float32).detach().cpu().numpy()
+
+    w_abs = np.abs(weights).flatten()
+    # Filter out zeros to avoid log errors
+    w_abs = w_abs[w_abs > 0]
+
+    # 2. Sort Descending
+    w_sorted = np.sort(w_abs)[::-1]
+    n = len(w_sorted)
+
+    if n < min_k:
+        return np.array([]), np.array([])
+
+    # 3. Determine range of k
+    max_k = int(n * max_k_fraction)
+    ks = np.arange(min_k, max_k)
+
+    # 4. Efficient Cumulative Calculation
+    # Hill formula: 1/k * sum(ln(w_i)) - ln(w_k)
+    log_w = np.log(w_sorted)
+    cumsum_log_w = np.cumsum(log_w)
+
+    # Get the sum of logs up to each k
+    sums_to_k = cumsum_log_w[ks - 1]
+    # Get the log of the threshold weight at each k
+    log_thresholds = log_w[ks]
+
+    # Calculate xi (the inverse alpha)
+    xis = (sums_to_k / ks) - log_thresholds
+
+    # 5. Final Alpha calculation with safety for zeros/negatives
+    # Using np.divide to handle any potential zeros gracefully
+    alphas = np.divide(1.0, xis, out=np.full_like(xis, np.inf), where=xis > 0)
+
+    return ks, alphas
+
+
+def frobenius_norm(weights):
+    if torch.is_tensor(weights):
+        weights = weights.to(torch.float32).detach().cpu().numpy()
+    return torch.linalg.norm(weights)
+
+
+def collect_sweep_metrics(sweep_dir, output_name="sweep_metrics.csv"):
+    """
+    The 'Satellite' Function:
+    Iterates through the 6x6 grid, calculates metrics file-by-file,
+    and saves to a tiny CSV. RAM usage stays flat.
+    """
+    sweep_path = Path(sweep_dir)
+    records = []
+
+    # 1. Walk through the alpha/sigma folders
+    # We use rglob to find all run_config files to identify run directories
+    config_files = list(sweep_path.rglob("run_config.json"))
+    print(f"Found {len(config_files)} runs. Starting metric extraction...")
+
+    for cfg_path in config_files:
+        run_dir = cfg_path.parent
+        ckpt_dir = run_dir / "checkpoints"
+
+        # Load Metadata
+        with open(cfg_path, "r") as f:
+            cfg = json.load(f)
+
+        # Pull parameters
+        metadata = {
+                    "init_alpha": cfg["ht_config"].get("alpha"),
+                    "init_sigma": cfg["ht_config"].get("g"),
+                }
+        final_epoch = cfg["hyperparams"].get("epochs")
+
+        # 2. Get all checkpoints in this specific run
+        all_ckpts = list(ckpt_dir.glob("weights_epoch_*.pth"))
+        final_pth = ckpt_dir / "final_model.pth"
+        if final_pth.exists():
+            all_ckpts.append(final_pth)
+
+        for ckpt in all_ckpts:
+            # Determine epoch number
+            if "final_model" in ckpt.name:
+                epoch_val = final_epoch
+            else:
+                match = re.search(r"epoch_(\d+)", ckpt.name)
+                epoch_val = int(match.group(1)) if match else -1
+
+            # 3. STREAMING LOAD: Open, Compute, Discard
+            checkpoint = torch.load(ckpt, map_location="cpu", weights_only=True)
+            state_dict = checkpoint.get("model_state", checkpoint)
+            if "state_dict" in checkpoint: state_dict = checkpoint["state_dict"]
+
+            for key, tensor in state_dict.items():
+                if "weight" in key:
+                    # Calculate metric immediately
+                    # We cast to float32 on the fly
+                    w_np = tensor.to(torch.float32).detach().numpy().flatten()
+                    val = get_layer_fingerprint(w_np)
+
+                    row = {**metadata, "epoch": epoch_val, "layer": key}
+                    row.update(val)
+                    records.append(row)
+
+            # 4. MEMORY CLEANUP: Clear the heavy objects
+            del checkpoint
+            del state_dict
+            # We don't gc.collect() every single file (too slow),
+            # but every run is a good balance.
+
+        print(f"Finished: {run_dir.parent.name}")
+        gc.collect()
+
+    # 5. Save the lightweight results
+    df = pd.DataFrame(records)
+    df.to_csv(output_name, index=False)
+    print(f"Done! Results saved to {output_name}")
+    return df
 
 
 def evaluate_spectral_perturbation(
@@ -392,6 +500,7 @@ def get_rmt_threshold_percentage(weight_tensor, broadener):
     # 4. Return as a percentage of the total rank
     return num_outside_bulk / len(nu)
 
+
 """This section contains contains functions for random matrix theory (RMT) analysis. Adapted from 10.1103/PhysRevE.106.054124"""
 from typing import List, Tuple, Any, Union
 from abc import ABC, abstractmethod
@@ -412,6 +521,7 @@ from tqdm import tqdm
 class Broadener(ABC):
     """Used to broaden a spectrum as an alternative to histograms
     and to unfold it."""
+
     @abstractmethod
     def broaden_spectrum(self, x: np.ndarray, svals: np.ndarray):
         """Return broadened spectrum from svals at positions x."""
@@ -431,52 +541,56 @@ class GaussBroadening(Broadener):
     values will not contribute to the broadened spectrum.
     Broadener also handles unfolding of the spectrum."""
 
-    def __init__(self, winSize: float, method: str = 'replicate'):
+    def __init__(self, winSize: float, method: str = "replicate"):
         self.winSize = winSize
-        if method in {'replicate', 'drop'}:
+        if method in {"replicate", "drop"}:
             self.method = method
         else:
-            raise ValueError(
-                'Method not recognized. Use "replicate" or "drop".')
+            raise ValueError('Method not recognized. Use "replicate" or "drop".')
 
     def broaden_spectrum(self, x: np.ndarray, svals: np.ndarray) -> np.ndarray:
         svals = self.preprocessSvals(svals)
         nSvals = np.size(svals)
         # standard deviations for boradening
-        stdevs = ((svals[2*self.winSize::] -
-                   svals[:-2*self.winSize:])/2).reshape((1, -1))
+        stdevs = (
+            (svals[2 * self.winSize : :] - svals[: -2 * self.winSize :]) / 2
+        ).reshape((1, -1))
         # means of each window
-        means = svals[self.winSize:-self.winSize:].reshape((1, -1))
+        means = svals[self.winSize : -self.winSize :].reshape((1, -1))
         # distribution as sum of gaussians
         xMat = x.reshape((-1, 1))
         # generate all gaussians
         pdf = GaussBroadening.gaussian(xMat, stdevs, means)
-        pdf = np.sum(pdf, axis=1)/nSvals
+        pdf = np.sum(pdf, axis=1) / nSvals
 
         return pdf
 
     def unfold_spectrum(self, svals: np.ndarray) -> np.ndarray:
         # unfold via the cdf
-        x = (svals[2*self.winSize:-2*self.winSize]).reshape((-1, 1))
-        means = (svals[self.winSize:-self.winSize]).reshape((1, -1))
-        stdvs = ((svals[2*self.winSize:] -
-                  svals[:-2*self.winSize])/2).reshape((1, -1))
+        x = (svals[2 * self.winSize : -2 * self.winSize]).reshape((-1, 1))
+        means = (svals[self.winSize : -self.winSize]).reshape((1, -1))
+        stdvs = ((svals[2 * self.winSize :] - svals[: -2 * self.winSize]) / 2).reshape(
+            (1, -1)
+        )
 
-        unfolded = 0.5*(1+erf((x-means)/(np.sqrt(2)*stdvs)))
+        unfolded = 0.5 * (1 + erf((x - means) / (np.sqrt(2) * stdvs)))
         unfolded = np.sum(unfolded, axis=1)
 
         return np.sort(unfolded)
 
     def preprocessSvals(self, svals: np.ndarray) -> np.ndarray:
-        if self.method == 'replicate':
+        if self.method == "replicate":
             svals = copy.deepcopy(svals)
-            svals = np.pad(svals, (self.winSize, self.winSize), 'edge')
+            svals = np.pad(svals, (self.winSize, self.winSize), "edge")
         return svals
 
     @staticmethod
     def gaussian(x: np.ndarray, sigma: np.ndarray, mu: np.ndarray) -> np.ndarray:
-        return 1/np.sqrt(2*np.pi*(sigma + 1e-15)**2) \
-            * np.exp(-((x-mu)**2 + 1e-15)/(2*(sigma+1e-15)**2))
+        return (
+            1
+            / np.sqrt(2 * np.pi * (sigma + 1e-15) ** 2)
+            * np.exp(-((x - mu) ** 2 + 1e-15) / (2 * (sigma + 1e-15) ** 2))
+        )
 
 
 """Theory curves..."""
@@ -485,7 +599,7 @@ class GaussBroadening(Broadener):
 def marcenkoPastur(x: np.ndarray, a: float, nuMax: float, nuMin: float) -> np.ndarray:
     """Modified Marcenko-Pastur distribution for three independent parameters
     nuMin, nuMax, and a."""
-    y = a/x * np.sqrt((nuMax**2-x**2)*(x**2-nuMin**2))
+    y = a / x * np.sqrt((nuMax**2 - x**2) * (x**2 - nuMin**2))
     y[y < 0] = 0.0
     y[np.imag(y) != 0] = 0.0
     y[np.isnan(y)] = 0.0
@@ -496,18 +610,18 @@ def marcenkoPastur(x: np.ndarray, a: float, nuMax: float, nuMin: float) -> np.nd
 def wignerSurmise(s: np.ndarray) -> np.ndarray:
     """Wigner surmise formula for spacing of unfolded spectra of
     GOE matrices."""
-    return np.pi*s/2 * np.exp(-1.0*np.pi*s**2/4)
+    return np.pi * s / 2 * np.exp(-1.0 * np.pi * s**2 / 4)
 
 
 def wignerSurmise_cdf(s: np.ndarray) -> np.ndarray:
     """CDF of Wigner surmise formula for spacing of unfolded spectra of
     GOE matrices."""
-    return 1 - np.exp(-s*s*np.pi/4)
+    return 1 - np.exp(-s * s * np.pi / 4)
 
 
 def power_law_cdf(x: np.ndarray, alpha: float, xmin: float):
     """Cumulative distribution for a powerlaw tail."""
-    return 1 - (x/xmin)**(1-alpha)
+    return 1 - (x / xmin) ** (1 - alpha)
 
 
 """Data processing..."""
@@ -519,7 +633,9 @@ def get_ipr(svec: np.ndarray):
     return ipr
 
 
-def pdf_from_spectrum(svals: np.ndarray, nSamples: int, broadener: Broadener) -> List[np.ndarray]:
+def pdf_from_spectrum(
+    svals: np.ndarray, nSamples: int, broadener: Broadener
+) -> List[np.ndarray]:
     """Uses broadening (defined by broadener) for the spectrum (svals) and returns the probability density as
     an array pdf evaluated at positions x. Parameter nSamples determines the number of point between consecutive
     values in sort(svals) to sample the pdf at."""
@@ -527,30 +643,51 @@ def pdf_from_spectrum(svals: np.ndarray, nSamples: int, broadener: Broadener) ->
     nSvals = np.size(svals)
     # determine x values with a number "nSamples" points between each
     # consecutive singular values
-    offset = 500*(svals[1]-svals[0])
-    if svals[1]-svals[0] > 0:
-        x = np.arange(-offset, svals[0], (svals[1]-svals[0])/nSamples)
+    offset = 500 * (svals[1] - svals[0])
+    if svals[1] - svals[0] > 0:
+        x = np.arange(-offset, svals[0], (svals[1] - svals[0]) / nSamples)
     else:
-        x = np.arange(svals[0]-0.1, svals[0], 0.01)
-    for i in range(nSvals-1):
-        if svals[i+1]-svals[i] > 0:
+        x = np.arange(svals[0] - 0.1, svals[0], 0.01)
+    for i in range(nSvals - 1):
+        if svals[i + 1] - svals[i] > 0:
             x = np.concatenate(
-                [x, np.arange(svals[i], svals[i+1], (svals[i+1]-svals[i])/nSamples)])
+                [
+                    x,
+                    np.arange(
+                        svals[i], svals[i + 1], (svals[i + 1] - svals[i]) / nSamples
+                    ),
+                ]
+            )
         else:
-            x = np.concatenate([x, [svals[i+1]]])
-    if svals[-1]-svals[-2] > 0:
-        x = np.concatenate([x, np.arange(
-            svals[-1], svals[-1]+500*(svals[-1]-svals[-2]), (svals[-1]-svals[-2])/nSamples)])
+            x = np.concatenate([x, [svals[i + 1]]])
+    if svals[-1] - svals[-2] > 0:
+        x = np.concatenate(
+            [
+                x,
+                np.arange(
+                    svals[-1],
+                    svals[-1] + 500 * (svals[-1] - svals[-2]),
+                    (svals[-1] - svals[-2]) / nSamples,
+                ),
+            ]
+        )
     else:
-        x = np.concatenate([x, np.arange(svals[-1], svals[-1]+0.1, 0.01)])
+        x = np.concatenate([x, np.arange(svals[-1], svals[-1] + 0.1, 0.01)])
     # evaluate broadend
     pdf = broadener.broaden_spectrum(x, svals)
 
     return [x, pdf]
 
 
-def fit_marcenkoPastur(svals: np.ndarray, broadener: np.ndarray, nSamples: int = 10, range_of_y_to_fit: float = 0.7, iNuMin: int = 0,
-                       initialParameters: Union[np.ndarray, None] = None, xMin: float = 0.0):
+def fit_marcenkoPastur(
+    svals: np.ndarray,
+    broadener: np.ndarray,
+    nSamples: int = 10,
+    range_of_y_to_fit: float = 0.7,
+    iNuMin: int = 0,
+    initialParameters: Union[np.ndarray, None] = None,
+    xMin: float = 0.0,
+):
     """Fix nuMin by the svals and then fit 2 parameter modified Marcenko-Pastur to the data."""
     # get pdf by broadening
     x, pdf = pdf_from_spectrum(svals, nSamples, broadener)
@@ -573,16 +710,19 @@ def fit_marcenkoPastur(svals: np.ndarray, broadener: np.ndarray, nSamples: int =
     pdfMax = np.max(pdf)
     # print(np.argmax(pdf), x_pdfMax, pdfMax)
     condition_keep = np.array(x <= x_pdfMax) | np.array(
-        pdf > range_of_y_to_fit*pdfMax)
+        pdf > range_of_y_to_fit * pdfMax
+    )
     pdf = pdf[condition_keep]
     x = x[condition_keep]
 
     try:
-        (a, nuMax), pcov = curve_fit(fit_fun, x, pdf,
-                                     initialParameters, bounds=parameterBounds)
+        (a, nuMax), pcov = curve_fit(
+            fit_fun, x, pdf, initialParameters, bounds=parameterBounds
+        )
     except:
-        (a, nuMax), pcov = curve_fit(fit_fun, x, pdf,
-                                     initialParameters, bounds=parameterBounds, maxfev=5000)
+        (a, nuMax), pcov = curve_fit(
+            fit_fun, x, pdf, initialParameters, bounds=parameterBounds, maxfev=5000
+        )
 
     return a, nuMin, nuMax, pcov
 
@@ -592,7 +732,7 @@ def unfold_spectrum(svals: np.ndarray, broadener: Broadener) -> np.ndarray:
     return broadener.unfold_spectrum(svals)
 
 
-def level_spacings(svals: np.ndarray,  broadener: Broadener) -> np.ndarray:
+def level_spacings(svals: np.ndarray, broadener: Broadener) -> np.ndarray:
     """Computes the level spacing of the unfolded spectrum (via broadening)."""
     unfolded = np.sort(unfold_spectrum(svals, broadener))
     return unfolded[1:] - unfolded[:-1]
@@ -602,11 +742,18 @@ def cdf_from_spectrum(svals: np.ndarray) -> List[np.ndarray]:
     """Computed the cdf from a spectrum, retruning x=svals and cdf."""
     svals = np.sort(svals)
     nValues = np.size(svals)
-    cdf = np.arange(0, nValues, 1)/nValues
+    cdf = np.arange(0, nValues, 1) / nValues
     return [svals, cdf]
 
 
-def level_number_variance(svals: np.ndarray, broadener: Broadener, L: np.ndarray, tol: float, maxIterations: int, minIterations: int) -> List[np.ndarray]:
+def level_number_variance(
+    svals: np.ndarray,
+    broadener: Broadener,
+    L: np.ndarray,
+    tol: float,
+    maxIterations: int,
+    minIterations: int,
+) -> List[np.ndarray]:
     """
     Computes the spectral regidity in an iterative fashion.
     Code adapted from empyricalRMT python package:
@@ -615,21 +762,30 @@ def level_number_variance(svals: np.ndarray, broadener: Broadener, L: np.ndarray
     """
     unfolded = broadener.unfold_spectrum(svals)
     unfolded = np.sort(unfolded)
-    print("xi_min=", np.min(unfolded), " xi_max=",
-          np.max(unfolded), " n=", np.size(unfolded))
+    print(
+        "xi_min=",
+        np.min(unfolded),
+        " xi_max=",
+        np.max(unfolded),
+        " n=",
+        np.size(unfolded),
+    )
 
     L_vals, sigma = _sigma_iter_converge(
         unfolded=unfolded,
         L=L,
         tol=tol,
         max_L_iters=maxIterations,
-        min_L_iters=minIterations)
+        min_L_iters=minIterations,
+    )
 
     return L_vals, sigma
 
 
 @jit(nopython=True, cache=True, fastmath=True, parallel=True)
-def _sigma_iter_converge(unfolded: np.ndarray, L: np.ndarray, tol: float, max_L_iters: int, min_L_iters: int) -> Tuple[np.ndarray, np.ndarray]:
+def _sigma_iter_converge(
+    unfolded: np.ndarray, L: np.ndarray, tol: float, max_L_iters: int, min_L_iters: int
+) -> Tuple[np.ndarray, np.ndarray]:
     """
     Code adapted from empyricalRMT python package:
     https://pypi.org/project/empyricalRMT/
@@ -649,7 +805,9 @@ def _sigma_iter_converge(unfolded: np.ndarray, L: np.ndarray, tol: float, max_L_
 
 
 @jit(nopython=True, cache=True, fastmath=True)
-def _sigma_iter_converge_L(unfolded: np.ndarray, L: float, tol: float, max_iters: int, min_iters: int) -> Any:
+def _sigma_iter_converge_L(
+    unfolded: np.ndarray, L: float, tol: float, max_iters: int, min_iters: int
+) -> Any:
     """
     Code adapted from empyricalRMT python package:
     https://pypi.org/project/empyricalRMT/
@@ -662,7 +820,7 @@ def _sigma_iter_converge_L(unfolded: np.ndarray, L: float, tol: float, max_iters
     # hold the last `size` running averages
     sigmas = np.zeros((size), dtype=np.float64)
 
-    c = np.random.uniform(np.min(unfolded)+L/2, np.max(unfolded)-L/2)
+    c = np.random.uniform(np.min(unfolded) + L / 2, np.max(unfolded) - L / 2)
     start, end = c - L / 2, c + L / 2
     n_within = len(unfolded[(unfolded >= start) & (unfolded <= end)])
     n_within_sq = n_within * n_within
@@ -675,7 +833,7 @@ def _sigma_iter_converge_L(unfolded: np.ndarray, L: float, tol: float, max_iters
     k = 0
     while True:
         k += 1
-        c = np.random.uniform(np.min(unfolded)+L/2, np.max(unfolded)-L/2)
+        c = np.random.uniform(np.min(unfolded) + L / 2, np.max(unfolded) - L / 2)
         start, end = c - L / 2, c + L / 2
         n_within = len(unfolded[(unfolded >= start) & (unfolded <= end)])
         n_within_sq = n_within * n_within
@@ -697,7 +855,7 @@ def ksTest_wigner(svals: np.ndarray, broadener: Broadener):
     """Tests level spacing of unfolded singular values vs wigner surmise with
     a Kolmogorov-Smirnov test. Takes the unaltered singular values and
     a Broadener which also defines unfolding."""
-    s = level_spacings(svals,  broadener)
+    s = level_spacings(svals, broadener)
     statistic, pValue = scipy.stats.kstest(s, wignerSurmise_cdf)
     return pValue
 
@@ -705,19 +863,21 @@ def ksTest_wigner(svals: np.ndarray, broadener: Broadener):
 def fit_Brody_bootstrap(svals: np.ndarray, broadener: Broadener, nSamples: int = 1000):
     """Using bootstrapping, determine mean in beta and error of the mean
     from fitting Brody distributions to the unfolded level spacing cdfs."""
+
     def brody(x, b):
-        return (1-np.exp(-1.0*scipy.special.gamma((b+2)/(b+1))**(1+b)*x**(1+b)))
+        return 1 - np.exp(
+            -1.0 * scipy.special.gamma((b + 2) / (b + 1)) ** (1 + b) * x ** (1 + b)
+        )
 
     def fit_Brody(s: np.ndarray):
         initialParameters = [1.0]
         parameterBounds = [[0], [np.inf]]
 
         x, y = cdf_from_spectrum(s)
-        b, pcov = curve_fit(brody, x, y, initialParameters,
-                            bounds=parameterBounds)
+        b, pcov = curve_fit(brody, x, y, initialParameters, bounds=parameterBounds)
         return b
 
-    s = level_spacings(svals,  broadener)
+    s = level_spacings(svals, broadener)
 
     betas = run_on_bootstarp(nSamples, fit_Brody, data=s)
     beta_error = np.std(betas)
@@ -730,6 +890,7 @@ def run_on_bootstarp(nSamples: int, func, data: np.ndarray):
     """Evaluates the function func for nSample different bootstrap
     samples from data."""
     return [func(bootstrapSample(data)) for _ in range(nSamples)]
+
 
 def bootstrapSample(data: Union[np.ndarray, List[float]]):
     """Randomly choose a bootstrap sample from data with
@@ -756,8 +917,10 @@ class CDF:
 def ks_Cbar(N: int, nSamples: int):
     """Get normed vector CDF for Porter-Thomas eigenvectors."""
     xi = np.random.randn(N, nSamples)
-    xi = xi/np.sqrt(np.sum(xi**2, axis=0))
-    xi = xi.reshape(-1,)
+    xi = xi / np.sqrt(np.sum(xi**2, axis=0))
+    xi = xi.reshape(
+        -1,
+    )
     Cbar_x = np.sort(xi)
     Cbar_y = np.arange(len(xi)) / (len(xi) - 1)
 
@@ -768,12 +931,12 @@ def ks_D(cdf: CDF, N: int, nSamples: int):
     """Monte-Carlo samples from Porter-Thomas vectors for nSamples samples
     and computes typical KS-distance D to given cdf for each sample.."""
     xi = np.random.randn(N, nSamples)
-    xi = xi/np.sqrt(np.sum(xi**2, axis=0))
+    xi = xi / np.sqrt(np.sum(xi**2, axis=0))
     Ds = []
     for i in range(nSamples):
         cdf_x_i = np.sort(xi[:, i])
         cdf_y_i = np.arange(len(xi[:, i])) / (len(xi[:, i]) - 1)
-        Ds.append(np.max(np.abs(cdf(cdf_x_i)-cdf_y_i)))
+        Ds.append(np.max(np.abs(cdf(cdf_x_i) - cdf_y_i)))
     return Ds
 
 
@@ -793,10 +956,12 @@ def ks_test_normedPT(x: np.ndarray, ks_C: CDF, Cbar: CDF):
     """Given the ks-test statistics ks_C(D) and underlying cdf Cbar,
     performs a ks test for x against the given distribution and
     returns the corresponding p-value."""
-    x = x.reshape(-1,)
+    x = x.reshape(
+        -1,
+    )
     cdf_x_i = np.sort(x)
     cdf_y_i = np.arange(len(x)) / (len(x) - 1)
-    D = np.max(np.abs(Cbar(cdf_x_i)-cdf_y_i))
+    D = np.max(np.abs(Cbar(cdf_x_i) - cdf_y_i))
     pvalue = 1 - ks_C(D)
     return pvalue
 
@@ -804,31 +969,44 @@ def ks_test_normedPT(x: np.ndarray, ks_C: CDF, Cbar: CDF):
 def ks_Cbar_pooled(N: int, nSamples: int, pooling_window: int):
     """Get normed vector CDF for a pool of Porter-Thomas eigenvectors."""
     xi = np.array([])
-    for _ in range(2*pooling_window):
+    for _ in range(2 * pooling_window):
         _xi = np.random.randn(N, nSamples)
-        _xi = _xi/np.sqrt(np.sum(_xi**2, axis=0))
-        _xi = _xi.reshape(-1,)
-        xi = np.concatenate([xi,_xi])
+        _xi = _xi / np.sqrt(np.sum(_xi**2, axis=0))
+        _xi = _xi.reshape(
+            -1,
+        )
+        xi = np.concatenate([xi, _xi])
     Cbar_x = np.sort(xi)
     Cbar_y = np.arange(len(xi)) / (len(xi) - 1)
 
     return CDF(Cbar_x, Cbar_y)
 
+
 @jit(nopython=True, cache=True, fastmath=True, parallel=True)
-def ks_D_pooled(cdf_x: np.ndarray,cdf_y: np.ndarray, N: int, nSamples: int, pooling_window: int ):
+def ks_D_pooled(
+    cdf_x: np.ndarray, cdf_y: np.ndarray, N: int, nSamples: int, pooling_window: int
+):
     """Monte-Carlo samples from a pool of Porter-Thomas vectors for nSamples samples
     and computes typical KS-distance D to given cdf for each sample.."""
-    Ds = np.zeros(nSamples,)
-    xi = np.zeros(N*2*pooling_window,)
+    Ds = np.zeros(
+        nSamples,
+    )
+    xi = np.zeros(
+        N * 2 * pooling_window,
+    )
     for i in range(nSamples):
-        for j in range(2*pooling_window):
-            _xi = np.random.randn(N, )
-            _xi = _xi/np.sqrt(np.sum(_xi**2))
-            _xi = _xi.reshape(-1,)
-            xi[j*N:(j+1)*N] = _xi
+        for j in range(2 * pooling_window):
+            _xi = np.random.randn(
+                N,
+            )
+            _xi = _xi / np.sqrt(np.sum(_xi**2))
+            _xi = _xi.reshape(
+                -1,
+            )
+            xi[j * N : (j + 1) * N] = _xi
         cdf_x_i = np.sort(xi)
         cdf_y_i = np.arange(len(xi)) / (len(xi) - 1)
-        Ds[i] = np.max(np.abs(np.interp(cdf_x_i, cdf_x, cdf_y)-cdf_y_i))
+        Ds[i] = np.max(np.abs(np.interp(cdf_x_i, cdf_x, cdf_y) - cdf_y_i))
     return Ds
 
 
@@ -840,7 +1018,7 @@ def ks_test_statistic_normedPT_pooled(N: int, nSamples: int, pooling_window: int
     print("Get Cbar...\n")
     Cbar = ks_Cbar_pooled(N, nSamples, pooling_window)
     print("Get D values for statistic...\n")
-    D = np.sort(ks_D_pooled(Cbar.x,Cbar.y, N, nSamples, pooling_window))
+    D = np.sort(ks_D_pooled(Cbar.x, Cbar.y, N, nSamples, pooling_window))
     print("Get KS statistics...\n")
     C = CDF(D, np.arange(len(D)) / (len(D) - 1))
 
@@ -853,10 +1031,10 @@ def ks_test_statistic_normedPT_pooled(N: int, nSamples: int, pooling_window: int
 @jit(nopython=True)
 def movmean(data, navg=3):
     """Computes a moving average of data with window navg."""
-    midindices = range(navg//2, data.size-navg//2+1)
+    midindices = range(navg // 2, data.size - navg // 2 + 1)
     mean = np.zeros(len(midindices))
     for i, imid in enumerate(midindices):
-        mean[i] = np.mean(data[imid-navg//2:imid+navg//2+1])
+        mean[i] = np.mean(data[imid - navg // 2 : imid + navg // 2 + 1])
     return mean
 
 
@@ -868,23 +1046,22 @@ def hill_estimator_avg(data, navg, avg_inverse=True, njump=1):
     M = np.flip(np.sort(M))  # /np.std(M)
     # ii) compute CDF
     M, cdf_M = cdf_from_spectrum(M)
-    cdf_M = (1-cdf_M).reshape((-1,))
+    cdf_M = (1 - cdf_M).reshape((-1,))
     # iii) estimate local inverse slope
-    zeta = - np.log(M[1:]/M[:-1])/np.log(cdf_M[1:]/cdf_M[:-1])
+    zeta = -np.log(M[1:] / M[:-1]) / np.log(cdf_M[1:] / cdf_M[:-1])
     if njump > 1:
-        zeta = zeta[:-(njump-1)]
-    for i in range(2, njump+1):
-        zeta_i = - np.log(M[i:]/M[:-i])/np.log(cdf_M[i:]/cdf_M[:-i])
-        zeta = np.vstack(
-            [zeta, zeta_i[:-(njump-i)] if njump-i > 0 else zeta_i])
+        zeta = zeta[: -(njump - 1)]
+    for i in range(2, njump + 1):
+        zeta_i = -np.log(M[i:] / M[:-i]) / np.log(cdf_M[i:] / cdf_M[:-i])
+        zeta = np.vstack([zeta, zeta_i[: -(njump - i)] if njump - i > 0 else zeta_i])
     if njump > 1:
         zeta = np.mean(zeta, axis=0)
     # iv) compute running averages with window nAvg
     if avg_inverse:
-        zeta_mean = 1/movmean(zeta, navg)
+        zeta_mean = 1 / movmean(zeta, navg)
     else:
-        zeta_mean = movmean(1/zeta, navg)
-    g_inv = 1/movmean(M[:-njump], navg)
+        zeta_mean = movmean(1 / zeta, navg)
+    g_inv = 1 / movmean(M[:-njump], navg)
     return g_inv, zeta_mean
 
 
@@ -909,18 +1086,36 @@ class PowerLawFitResult:
         return self.p >= 0.1
 
 
-def tail_powerlaw_fit(s: np.ndarray, nSamples=2500, savePath: str = None, load_path_list: list = None):
+def tail_powerlaw_fit(
+    s: np.ndarray, nSamples=2500, savePath: str = None, load_path_list: list = None
+):
     """Performs a power law tail fit to s and computes the p-value for the fit."""
     s = np.sort(copy.deepcopy(s))
 
     Ds, ks_C = powerlaw_test_statistic(
-        copy.deepcopy(s), savePath=savePath, load_path_list=load_path_list, nSamples=nSamples)
+        copy.deepcopy(s),
+        savePath=savePath,
+        load_path_list=load_path_list,
+        nSamples=nSamples,
+    )
 
     alpha, xmin, D, fit = fit_powerlaw(s, return_fit_obj=True)
 
     p = 1.0 - ks_C(D)
 
-    return PowerLawFitResult(fit=fit, p=p, alpha=alpha, xmin=xmin, D=D, Ds=Ds, ks_C=ks_C, n=np.size(s), nTail=np.size(s[s > xmin]), s_min=np.min(s), s_max=np.max(s))
+    return PowerLawFitResult(
+        fit=fit,
+        p=p,
+        alpha=alpha,
+        xmin=xmin,
+        D=D,
+        Ds=Ds,
+        ks_C=ks_C,
+        n=np.size(s),
+        nTail=np.size(s[s > xmin]),
+        s_min=np.min(s),
+        s_max=np.max(s),
+    )
 
 
 def powerlaw_test_statistic(s, savePath=None, load_path_list=None, nSamples=2500):
@@ -951,7 +1146,7 @@ def powerlaw_test_statistic(s, savePath=None, load_path_list=None, nSamples=2500
         Ds = []
         for _ in tqdm(range(nSamples)):
             deciders = np.random.rand(n)
-            nBulk_draw = np.sum(deciders < (nBulk/n))
+            nBulk_draw = np.sum(deciders < (nBulk / n))
             nTail_draw = n - nBulk_draw
 
             sample_tail = draw_power_law(alpha, xmin, shape=(nTail_draw,))
@@ -974,7 +1169,7 @@ def powerlaw_test_statistic(s, savePath=None, load_path_list=None, nSamples=2500
 def draw_power_law(alpha, xmin, shape):
     """Draw a numpy array of shape "shape" from a power law tail distribution
     with alpha and xmin."""
-    pwlData = np.random.rand(*shape)**(1/(1-alpha)) * xmin
+    pwlData = np.random.rand(*shape) ** (1 / (1 - alpha)) * xmin
     return pwlData.reshape(*shape)
 
 
@@ -983,22 +1178,37 @@ def fit_powerlaw(s: np.ndarray, return_fit_obj=False):
     alpha, xmin"""
     results = powerlaw.Fit(s, xmax=np.max(s), verbose=False)
     if return_fit_obj:
-        return results.power_law.alpha, results.power_law.xmin, results.power_law.D, results
+        return (
+            results.power_law.alpha,
+            results.power_law.xmin,
+            results.power_law.D,
+            results,
+        )
     return results.power_law.alpha, results.power_law.xmin, results.power_law.D
 
 
 def power_law_cdf(x: np.ndarray, alpha: float, xmin: float):
     """Power law cdf."""
-    return 1 - (x/xmin)**(1-alpha)
+    return 1 - (x / xmin) ** (1 - alpha)
 
 
 def fit_truncated_powerlaw(s: np.ndarray, return_fit_obj=False):
     """Perfrom a truncated power law fit."""
-    results = PowerlawFitWithLambda(s, xmax=np.max(
-        s), xmin_distribution="truncated_power_law")
+    results = PowerlawFitWithLambda(
+        s, xmax=np.max(s), xmin_distribution="truncated_power_law"
+    )
     if return_fit_obj:
-        return results.truncated_power_law.alpha, results.truncated_power_law.xmin, results.truncated_power_law.Lambda, results
-    return results.truncated_power_law.alpha, results.truncated_power_law.xmin, results.truncated_power_law.Lambda
+        return (
+            results.truncated_power_law.alpha,
+            results.truncated_power_law.xmin,
+            results.truncated_power_law.Lambda,
+            results,
+        )
+    return (
+        results.truncated_power_law.alpha,
+        results.truncated_power_law.xmin,
+        results.truncated_power_law.Lambda,
+    )
 
 
 class PowerlawFitWithLambda(powerlaw.Fit):
@@ -1018,6 +1228,7 @@ class PowerlawFitWithLambda(powerlaw.Fit):
         This is the method of Clauset et al. 2007.
         """
         from numpy import unique, asarray, argmin, nan, repeat, arange
+
         # Much of the rest of this function was inspired by Adam Ginsburg's plfit code,
         # specifically the mapping and sigma threshold behavior:
         # http://code.google.com/p/agpy/source/browse/trunk/plfit/plfit.py?spec=svn359&r=357
@@ -1036,9 +1247,13 @@ class PowerlawFitWithLambda(powerlaw.Fit):
             xmin_distance = self.xmin_distance
 
         if len(xmins) <= 0:
-            print("Less than 2 unique data values left after xmin and xmax "
-                  "options! Cannot fit. Returning nans.", file=sys.stderr)
+            print(
+                "Less than 2 unique data values left after xmin and xmax "
+                "options! Cannot fit. Returning nans.",
+                file=sys.stderr,
+            )
             from numpy import nan, array
+
             self.xmin = nan
             self.D = nan
             self.V = nan
@@ -1047,7 +1262,7 @@ class PowerlawFitWithLambda(powerlaw.Fit):
             self.alpha = nan
             self.sigma = nan
             self.n_tail = nan
-            setattr(self, xmin_distance+'s', array([nan]))
+            setattr(self, xmin_distance + "s", array([nan]))
             self.alphas = array([nan])
             self.sigmas = array([nan])
             self.in_ranges = array([nan])
@@ -1056,26 +1271,40 @@ class PowerlawFitWithLambda(powerlaw.Fit):
             return self.xmin
 
         def fit_function(xmin, idx, num_xmins):
-            #print('xmin progress: {:02d}%'.format(int(idx/num_xmins * 100)), end='\r')
-            pl = self.xmin_distribution(xmin=xmin,
-                                        xmax=self.xmax,
-                                        discrete=self.discrete,
-                                        estimate_discrete=self.estimate_discrete,
-                                        fit_method=self.fit_method,
-                                        data=self.data,
-                                        parameter_range=self.parameter_range,
-                                        parent_Fit=self)
-            if not hasattr(pl, 'sigma'):
+            # print('xmin progress: {:02d}%'.format(int(idx/num_xmins * 100)), end='\r')
+            pl = self.xmin_distribution(
+                xmin=xmin,
+                xmax=self.xmax,
+                discrete=self.discrete,
+                estimate_discrete=self.estimate_discrete,
+                fit_method=self.fit_method,
+                data=self.data,
+                parameter_range=self.parameter_range,
+                parent_Fit=self,
+            )
+            if not hasattr(pl, "sigma"):
                 pl.sigma = nan
-            if not hasattr(pl, 'alpha'):
+            if not hasattr(pl, "alpha"):
                 pl.alpha = nan
-            return getattr(pl, xmin_distance), pl.alpha, pl.sigma, pl.in_range(), pl, pl.Lambda
+            return (
+                getattr(pl, xmin_distance),
+                pl.alpha,
+                pl.sigma,
+                pl.in_range(),
+                pl,
+                pl.Lambda,
+            )
 
         num_xmins = len(xmins)
-        fits = asarray(list(map(fit_function, xmins, arange(
-            num_xmins), repeat(num_xmins, num_xmins))))
+        fits = asarray(
+            list(
+                map(
+                    fit_function, xmins, arange(num_xmins), repeat(num_xmins, num_xmins)
+                )
+            )
+        )
         # logging.warning(fits.shape)
-        setattr(self, xmin_distance+'s', fits[:, 0])
+        setattr(self, xmin_distance + "s", fits[:, 0])
         self.alphas = fits[:, 1]
         self.sigmas = fits[:, 2]
         self.in_ranges = fits[:, 3].astype(bool)
@@ -1089,15 +1318,17 @@ class PowerlawFitWithLambda(powerlaw.Fit):
             good_values = good_values * (self.sigmas < self.sigma_threshold)
 
         if good_values.all():
-            min_D_index = argmin(getattr(self, xmin_distance+'s'))
+            min_D_index = argmin(getattr(self, xmin_distance + "s"))
             self.noise_flag = False
         elif not good_values.any():
-            min_D_index = argmin(getattr(self, xmin_distance+'s'))
+            min_D_index = argmin(getattr(self, xmin_distance + "s"))
             self.noise_flag = True
         else:
             from numpy.ma import masked_array
+
             masked_Ds = masked_array(
-                getattr(self, xmin_distance+'s'), mask=~good_values)
+                getattr(self, xmin_distance + "s"), mask=~good_values
+            )
             min_D_index = masked_Ds.argmin()
             self.noise_flag = False
 
@@ -1106,8 +1337,7 @@ class PowerlawFitWithLambda(powerlaw.Fit):
 
         # Set the Fit's xmin to the optimal xmin
         self.xmin = xmins[min_D_index]
-        setattr(self, xmin_distance, getattr(
-            self, xmin_distance+'s')[min_D_index])
+        setattr(self, xmin_distance, getattr(self, xmin_distance + "s")[min_D_index])
         self.alpha = self.alphas[min_D_index]
         self.sigma = self.sigmas[min_D_index]
         self.Lambda = self.lambdas[min_D_index]

@@ -6,6 +6,9 @@ import sys
 import random
 import numpy as np
 import logging
+import json
+import pandas as pd
+import re
 from torch.utils.data import DataLoader, TensorDataset
 from torchvision import datasets, transforms
 from . import architectures
@@ -297,24 +300,150 @@ def apply_heavy_tailed_init(model, alpha, g, base_seed=0):
 
 def get_layer_from_checkpoint(model_path, layer_key):
     """
-    Retrieves a specific weight matrix from a saved checkpoint.
+    Retrieves a specific weight matrix from a saved checkpoint,
+    automatically handles nested state_dicts, and casts to float32.
 
     Args:
         model_path (str or Path): Path to the .pth file.
         layer_key (str): The state_dict key (e.g., 'features.0.weight').
-    """
-    # Load to CPU to avoid filling up VRAM during analysis
-    checkpoint = torch.load(model_path, map_location="cpu")
 
-    # Handle the nested 'model_state' or 'model_state_dict' structure
-    # common in your ml_library.py exports
+    Returns:
+        torch.Tensor: The weight matrix as a float32 tensor on CPU.
+    """
+    # Load to CPU. weights_only=True is safer and faster for simple weight extraction.
+    checkpoint = torch.load(model_path, map_location="cpu", weights_only=True)
+
+    # Handle nested 'model_state' or 'model_state_dict' or raw state_dict
     state_dict = checkpoint.get("model_state", checkpoint)
+    if not isinstance(state_dict, dict):
+        # Fallback for other common nesting keys
+        state_dict = checkpoint.get("state_dict", checkpoint)
 
     if layer_key not in state_dict:
         available = list(state_dict.keys())
-        raise KeyError(f"Layer '{layer_key}' not found. Available: {available}")
+        # Filter for only 'weight' keys to make the error message more readable
+        weights_only_keys = [k for k in available if "weight" in k]
+        raise KeyError(
+            f"Layer '{layer_key}' not found. Available weights: {weights_only_keys}"
+        )
 
-    return state_dict[layer_key].detach().float()
+    # 1. Detach from any graph
+    # 2. .float() converts bfloat16/half/double to standard float32
+    # 3. .cpu() ensures it is ready for numpy conversion
+    return state_dict[layer_key].detach().float().cpu()
+
+
+def collect_run_snapshots(run_path):
+    """
+    Scans a run folder, extracts weight matrices, casts bfloat16 to float32,
+    and returns a DataFrame of the weights history.
+    """
+    run_path = Path(run_path)
+    checkpoint_dir = run_path / "checkpoints"
+    config_path = run_path / "run_config.json"
+
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config not found at {config_path}")
+
+    # 1. Load config for metadata
+    with open(config_path, "r") as f:
+        config = json.load(f)
+
+    final_epoch_val = config["hyperparams"]["epochs"]
+
+    snapshot_data = []
+
+    # 2. Identify all checkpoint files
+    # This pattern matches 'weight_epoch_X.pth'
+    ckpt_files = list(checkpoint_dir.glob("weights_epoch_*.pth"))
+
+    def process_file(file_path, epoch_val):
+        # Load the checkpoint
+        checkpoint = torch.load(file_path, map_location="cpu", weights_only=True)
+        state_dict = checkpoint.get("model_state", checkpoint)
+
+        if (
+            not any("weight" in k for k in state_dict.keys())
+            and "state_dict" in checkpoint
+        ):
+            state_dict = checkpoint["state_dict"]
+
+        for key, tensor in state_dict.items():
+            if "weight" in key:
+                # Cast and flatten
+                flat_weights = tensor.to(torch.float32).detach().numpy().flatten()
+
+                snapshot_data.append(
+                    {"epoch": epoch_val, "layer": key, "weights": flat_weights}
+                )
+
+    # 3. Process intermediate snapshots
+    for ckpt in ckpt_files:
+        try:
+            epoch_num = int(re.search(r"epoch_(\d+)", ckpt.name).group(1))
+            process_file(ckpt, epoch_num)
+        except AttributeError:
+            continue  # Skip files that don't match the naming convention
+
+    # 4. Process final model
+    final_pth = checkpoint_dir / "final_model.pth"
+    if final_pth.exists():
+        process_file(final_pth, final_epoch_val)
+
+    # 5. Build and clean DataFrame
+    df = pd.DataFrame(snapshot_data)
+
+    # Ensure numerical sorting (crucial for Ridge Plots)
+    df = df.sort_values(by=["layer", "epoch"]).reset_index(drop=True)
+
+    return df
+
+
+def collect_sweep_learning_curves(sweep_dir):
+    """
+    Iterates through the sweep and pulls train/test loss and accuracy
+    from every 'train_log.csv' into one master DataFrame.
+    """
+    sweep_path = Path(sweep_dir)
+    all_run_logs = []
+
+    # 1. Find all run_config files to locate the runs
+    configs = list(sweep_path.rglob("run_config.json"))
+    print(f"Found {len(configs)} training logs. Aggregating...")
+
+    for cfg_path in configs:
+        run_dir = cfg_path.parent
+        log_path = run_dir / "train_log.csv"
+
+        if not log_path.exists():
+            print(f"Warning: Log missing for {run_dir.name}")
+            continue
+
+        # 2. Load Metadata
+        with open(cfg_path, "r") as f:
+            cfg = json.load(f)
+
+        a_init = cfg["ht_config"].get("alpha")
+        s_init = cfg["ht_config"].get("g")
+
+        # 3. Load the actual CSV data
+        run_log = pd.read_csv(log_path)
+
+        # 4. Inject metadata into every row of this run
+        run_log["init_alpha"] = a_init
+        run_log["init_sigma"] = s_init
+        run_log["run_id"] = run_dir.parent.name  # e.g., alpha_2.0_sigma_3.0
+
+        all_run_logs.append(run_log)
+
+    # 5. Combine into master Frame
+    if not all_run_logs:
+        raise ValueError("No training logs found in the provided directory.")
+
+    master_df = pd.concat(all_run_logs, ignore_index=True)
+
+    print(f"Success! Combined {len(master_df)} training steps into master log.")
+    return master_df
 
 
 def setup_experiment(config_path, checkpoint_path=None, device="cpu"):
