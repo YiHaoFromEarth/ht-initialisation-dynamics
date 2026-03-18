@@ -8,6 +8,14 @@ import re
 import gc
 from pathlib import Path
 from scipy.optimize import curve_fit
+from .equations import (
+    hill_estimator,
+    relative_frobenius_norm,
+    spectral_norm,
+    spectral_gap,
+    layerwise_cosine,
+    stable_rank
+)
 from .utils import (
     load_master_config,
     get_dataset_class,
@@ -28,7 +36,7 @@ def get_singular_values(matrix):
 
     # Paper analyzes singular values directly
     s = torch.linalg.svdvals(matrix.float())
-    return s.detach().cpu().numpy()
+    return s.numpy()
 
 
 def get_layer_fingerprint(W):
@@ -36,51 +44,151 @@ def get_layer_fingerprint(W):
     Modular fingerprinting for a single weight matrix.
     Add any new metric by simply adding a key-value pair to the dict.
     """
-    # 1. Standardize to float32 NumPy for the basic metrics
     if torch.is_tensor(W):
-        W_torch = W.detach().cpu().float()
-        W_flat = W_torch.numpy().flatten()
+        W_torch = W.float()
     else:
-        W_flat = W.flatten()
         W_torch = torch.from_numpy(W).float()
 
     # --- EXTENSIBLE METRIC SECTION ---
     # You can add new metrics here easily.
     fingerprint = {
-        "alpha": hill_estimator(W_flat, k_percent=0.01),
-        "frobenius": np.linalg.norm(W_flat),
-
-        # Example of how to add more:
-        # "mean": np.mean(W_flat),
-        # "std": np.std(W_flat),
+        "alpha": hill_estimator(W_torch, k_percent=0.01),
+        "spectral_norm": spectral_norm(W_torch),
+        "spectral_gap": spectral_gap(W_torch),
+        "stable_rank": stable_rank(W_torch)
     }
 
     return fingerprint
 
 
-def hill_estimator(weights, k_percent=0.01):
-    if torch.is_tensor(weights):
-        weights = weights.to(torch.float32).detach().cpu().numpy()
+def get_difference_fingerprint(W, W0):
+    """
+    Modular fingerprinting for the difference between a snapshot and the initial.
+    Add any new metric by simply adding a key-value pair to the dict.
+    """
+    if torch.is_tensor(W):
+        W_torch = W.float()
+        W0_torch = W0.float()
+    else:
+        W_torch = torch.from_numpy(W).float()
+        W0_torch = torch.from_numpy(W0).float()
 
-    # Take absolute values and sort descending
-    w_sorted = np.sort(np.abs(weights))[::-1]
+    # --- EXTENSIBLE METRIC SECTION ---
+    # You can add new metrics here easily.
+    fingerprint = {
+        "frobenius": relative_frobenius_norm(W_torch, W0_torch),
+        "layerwise_cosine": layerwise_cosine(W_torch, W0_torch),
+    }
 
-    # Select top k entries
-    k = int(len(w_sorted) * k_percent)
-    if k < 2:
-        return np.nan
+    return fingerprint
 
-    # Hill formula
-    log_diffs = np.log(w_sorted[:k] / w_sorted[k])
-    xi = np.mean(log_diffs)
 
-    return 1 / xi if xi > 0 else np.inf
+def collect_sweep_metrics(sweep_dir, output_name="sweep_metrics.csv"):
+    """
+    Iterates through a sweep, calculates metrics file-by-file,
+    and saves to a CSV.
+    """
+    sweep_path = Path(sweep_dir)
+    records = []
+
+    # 1. Walk through the alpha/sigma folders
+    # We use rglob to find all run_config files to identify run directories
+    config_files = list(sweep_path.rglob("run_config.json"))
+    print(f"Found {len(config_files)} runs. Starting metric extraction...")
+
+    for cfg_path in config_files:
+        run_dir = cfg_path.parent
+        ckpt_dir = run_dir / "checkpoints"
+
+        # Load Metadata
+        with open(cfg_path, "r") as f:
+            cfg = json.load(f)
+
+        # Pull parameters
+        metadata = {
+            "init_alpha": cfg["ht_config"].get("alpha"),
+            "init_sigma": cfg["ht_config"].get("g"),
+        }
+        final_epoch = cfg["hyperparams"].get("epochs")
+
+        # 2. Identify and Sort Checkpoints
+        all_ckpts = list(ckpt_dir.glob("weights_epoch_*.pth"))
+
+        # Sort by epoch number to ensure we hit 0 first
+        all_ckpts.sort(key=lambda x: int(re.search(r"epoch_(\d+)", x.name).group(1)))
+
+        # Pre-load Epoch 0 to serve as our reference for cumulative difference
+        w0_dict = {}
+        first_ckpt = torch.load(all_ckpts[0], map_location="cpu", weights_only=True)
+        w0_state = first_ckpt.get(
+            "model_state", first_ckpt.get("state_dict", first_ckpt)
+        )
+        for k, v in w0_state.items():
+            if "weight" in k:
+                w0_dict[k] = v.to(torch.float32).clone()
+
+        # Add final_model to the end of the list after sorting
+        final_pth = ckpt_dir / "final_model.pth"
+        if final_pth.exists():
+            all_ckpts.append(final_pth)
+
+        for ckpt in all_ckpts:
+            # Determine epoch number
+            if "final_model" in ckpt.name:
+                epoch_val = final_epoch
+            else:
+                match = re.search(r"epoch_(\d+)", ckpt.name)
+                epoch_val = int(match.group(1)) if match else -1
+
+            # 3. STREAMING LOAD: Open, Compute, Discard
+            checkpoint = torch.load(ckpt, map_location="cpu", weights_only=True)
+            state_dict = checkpoint.get("model_state", checkpoint)
+            if "state_dict" in checkpoint:
+                state_dict = checkpoint["state_dict"]
+
+            for key, tensor in state_dict.items():
+                if "weight" in key and key in w0_dict:
+                    # Calculate metric immediately
+                    # If final snapshot, we downcast to bfloat16 first to avoid artifacts
+                    w0 = w0_dict[key].numpy()
+                    if "final_model" in ckpt.name:
+                        w_np = (
+                            tensor.to(torch.bfloat16)
+                            .to(torch.float32)
+                            .numpy()
+                        )
+                    else:
+                        w_np = tensor.to(torch.float32).numpy()
+
+                    fingerprint = get_layer_fingerprint(w_np)
+                    diff_print = get_difference_fingerprint(w_np, w0)
+
+                    row = {**metadata, "epoch": epoch_val, "layer": key}
+                    row.update(fingerprint)
+                    row.update(diff_print)
+                    records.append(row)
+
+            # 4. MEMORY CLEANUP: Clear the heavy objects
+            del checkpoint
+            del state_dict
+            # We don't gc.collect() every single file (too slow),
+            # but every run is a good balance.
+
+        print(f"Finished: {run_dir.parent.name}")
+        del w0_dict
+        gc.collect()
+
+    # 5. Save the lightweight results
+    df = pd.DataFrame(records)
+    df.to_csv(output_name, index=False)
+    print(f"Done! Results saved to {output_name}")
+    return df
 
 
 def get_hill_plot(weights, max_k_fraction=0.1, min_k=10):
     # 1. Standardize and Flatten
     if torch.is_tensor(weights):
-        weights = weights.to(torch.float32).detach().cpu().numpy()
+        weights = weights.to(torch.float32).numpy()
 
     w_abs = np.abs(weights).flatten()
     # Filter out zeros to avoid log errors
@@ -115,87 +223,6 @@ def get_hill_plot(weights, max_k_fraction=0.1, min_k=10):
     alphas = np.divide(1.0, xis, out=np.full_like(xis, np.inf), where=xis > 0)
 
     return ks, alphas
-
-
-def frobenius_norm(weights):
-    if torch.is_tensor(weights):
-        weights = weights.to(torch.float32).detach().cpu().numpy()
-    return torch.linalg.norm(weights)
-
-
-def collect_sweep_metrics(sweep_dir, output_name="sweep_metrics.csv"):
-    """
-    The 'Satellite' Function:
-    Iterates through the 6x6 grid, calculates metrics file-by-file,
-    and saves to a tiny CSV. RAM usage stays flat.
-    """
-    sweep_path = Path(sweep_dir)
-    records = []
-
-    # 1. Walk through the alpha/sigma folders
-    # We use rglob to find all run_config files to identify run directories
-    config_files = list(sweep_path.rglob("run_config.json"))
-    print(f"Found {len(config_files)} runs. Starting metric extraction...")
-
-    for cfg_path in config_files:
-        run_dir = cfg_path.parent
-        ckpt_dir = run_dir / "checkpoints"
-
-        # Load Metadata
-        with open(cfg_path, "r") as f:
-            cfg = json.load(f)
-
-        # Pull parameters
-        metadata = {
-                    "init_alpha": cfg["ht_config"].get("alpha"),
-                    "init_sigma": cfg["ht_config"].get("g"),
-                }
-        final_epoch = cfg["hyperparams"].get("epochs")
-
-        # 2. Get all checkpoints in this specific run
-        all_ckpts = list(ckpt_dir.glob("weights_epoch_*.pth"))
-        final_pth = ckpt_dir / "final_model.pth"
-        if final_pth.exists():
-            all_ckpts.append(final_pth)
-
-        for ckpt in all_ckpts:
-            # Determine epoch number
-            if "final_model" in ckpt.name:
-                epoch_val = final_epoch
-            else:
-                match = re.search(r"epoch_(\d+)", ckpt.name)
-                epoch_val = int(match.group(1)) if match else -1
-
-            # 3. STREAMING LOAD: Open, Compute, Discard
-            checkpoint = torch.load(ckpt, map_location="cpu", weights_only=True)
-            state_dict = checkpoint.get("model_state", checkpoint)
-            if "state_dict" in checkpoint: state_dict = checkpoint["state_dict"]
-
-            for key, tensor in state_dict.items():
-                if "weight" in key:
-                    # Calculate metric immediately
-                    # We cast to float32 on the fly
-                    w_np = tensor.to(torch.float32).detach().numpy().flatten()
-                    val = get_layer_fingerprint(w_np)
-
-                    row = {**metadata, "epoch": epoch_val, "layer": key}
-                    row.update(val)
-                    records.append(row)
-
-            # 4. MEMORY CLEANUP: Clear the heavy objects
-            del checkpoint
-            del state_dict
-            # We don't gc.collect() every single file (too slow),
-            # but every run is a good balance.
-
-        print(f"Finished: {run_dir.parent.name}")
-        gc.collect()
-
-    # 5. Save the lightweight results
-    df = pd.DataFrame(records)
-    df.to_csv(output_name, index=False)
-    print(f"Done! Results saved to {output_name}")
-    return df
 
 
 def evaluate_spectral_perturbation(
