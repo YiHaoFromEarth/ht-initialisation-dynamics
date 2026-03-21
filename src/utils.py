@@ -569,37 +569,30 @@ def apply_spectral_filter_to_model(
     return altered_model
 
 
-def evaluate_test_acc(model, test_loader, num_iterations=1, device="cpu"):
+@torch.no_grad()
+def evaluate_model(model, loader, device, criterion):
     """
-    Evaluates the model performance over multiple iterations.
+    Standardized evaluation for a single data loader.
+    Returns a dictionary of metrics for easy logging.
     """
     model.eval()
-    model.to(device)
+    total_loss = 0.0
+    correct = 0
+    total = 0
 
-    all_accuracies = []
+    for inputs, labels in loader:
+        inputs, labels = inputs.to(device), labels.to(device)
 
-    with torch.no_grad():
-        for i in range(num_iterations):
-            correct = 0
-            total = 0
+        outputs = model(inputs)
+        loss = criterion(outputs, labels)
 
-            # If your loader is a TensorDataset from the 'fast_load' path,
-            # this loop will be extremely fast.
-            for images, labels in test_loader:
-                images, labels = images.to(device), labels.to(device)
+        total_loss += loss.item()
+        _, predicted = outputs.max(1)
+        total += labels.size(0)
+        correct += predicted.eq(labels).sum().item()
 
-                outputs = model(images)
-                _, predicted = torch.max(outputs.data, 1)
+    # Calculate final averages
+    avg_loss = total_loss / len(loader) if len(loader) > 0 else 0
+    accuracy = correct / total if total > 0 else 0
 
-                total += labels.size(0)
-                correct += (predicted == labels).sum().item()
-
-            acc = 100 * correct / total
-            all_accuracies.append(acc)
-
-    # Convert to numpy for stats
-    acc_array = np.array(all_accuracies)
-    mean_acc = np.mean(acc_array)
-    std_acc = np.std(acc_array) if num_iterations > 1 else 0.0
-
-    return mean_acc, std_acc
+    return {"loss": avg_loss, "acc": accuracy}

@@ -14,7 +14,7 @@ from .equations import (
     spectral_norm,
     spectral_gap,
     layerwise_cosine,
-    stable_rank
+    stable_rank,
 )
 from .utils import (
     load_master_config,
@@ -23,7 +23,7 @@ from .utils import (
     get_universal_loader,
     model_factory,
     apply_spectral_filter_to_model,
-    evaluate_test_acc,
+    evaluate_model,
 )
 
 
@@ -55,7 +55,7 @@ def get_layer_fingerprint(W):
         "alpha": hill_estimator(W_torch, k_percent=0.01),
         "spectral_norm": spectral_norm(W_torch),
         "spectral_gap": spectral_gap(W_torch),
-        "stable_rank": stable_rank(W_torch)
+        "stable_rank": stable_rank(W_torch),
     }
 
     return fingerprint
@@ -440,6 +440,7 @@ def run_spectral_scan(
     num_centers=15,
     iterations=1,
     device="cpu",
+    criterion=nn.CrossEntropyLoss(),
 ):
     """
     Orchestrates a full spectral scan across different centers and kernel types.
@@ -485,10 +486,18 @@ def run_spectral_scan(
         # Average KL across targeted layers (Mean Spectral Distortion)
         mean_kl = np.mean(kl_values) if kl_values else 0.0
 
-        # 3. Evaluate performance (Mean and Std)
-        mean_acc, std_acc = evaluate_test_acc(
-            reconstructed_model, test_loader, num_iterations=iterations, device=device
-        )
+        # 3. Performance Evaluation using your new consolidated function
+        # We run the consolidated function 'iterations' times
+        iter_accs = []
+        for _ in range(iterations):
+            metrics = evaluate_model(
+                reconstructed_model, test_loader, device, criterion
+            )
+            # Multiplying by 100 to keep your percentage format if desired
+            iter_accs.append(metrics["acc"] * 100)
+
+        mean_acc = np.mean(iter_accs)
+        std_acc = np.std(iter_accs) if iterations > 1 else 0.0
 
         # 4. Store the metadata for plotting
         scan_results.append(

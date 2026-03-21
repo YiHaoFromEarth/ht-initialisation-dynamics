@@ -15,180 +15,12 @@ from .utils import (
     optimizer_factory,
     apply_heavy_tailed_init,
     setup_experiment,
+    evaluate_model,
     TeeLogger,
 )
 
 
 def train_model(
-    model_input,
-    model_params,
-    optim_class,
-    optim_params,
-    hyperparams,
-    data_config,
-    loaders,
-    seed,
-    output_root,
-    log_freq=10,
-):
-    """
-    Foundational orchestrator to initialize, train, and log an ML experiment.
-    """
-    # Store the original terminal handle
-    original_stdout = sys.stdout
-    logger = None
-
-    try:
-        # 1. Strict Determinism
-        set_seed(seed)
-
-        device = hyperparams.get("device", "cpu")
-
-        # 2. Flexible Model Acquisition
-        if isinstance(model_input, nn.Module):
-            # We were passed a pre-initialized model instance
-            model = model_input
-            model_name = model.__class__.__name__
-        else:
-            # Standard path: Initialize from class and params
-            m_args = model_params.get("args", [])
-            m_kwargs = model_params.get("kwargs", {})
-            model = model_factory(model_input, *m_args, **m_kwargs)
-            model_name = model_input.__name__
-        if model is None:
-            return None  # Graceful exit on init failure
-        model = model.to(device)
-
-        # 3. Directory and Metadata Setup
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        folder_name = f"{model_name}_LR{optim_params.get('lr', 'N/A')}_BS{data_config['batch_size']}_{timestamp}_s{seed}"
-        run_dir = Path(output_root) / folder_name
-        run_dir.mkdir(parents=True, exist_ok=True)
-
-        # Start logging console output to file
-        sys.stdout = TeeLogger(run_dir / "console_output.txt")
-        print(f"Logging initialized in: {run_dir}")
-
-        # 4. Optimizer Initialization (via Factory)
-        optimizer = optimizer_factory(optim_class, model.parameters(), **optim_params)
-        if optimizer is None:
-            return None
-
-        # 5. Architecture Documentation
-        with open(run_dir / "architecture.txt", "w") as f:
-            # Assumes MNIST/Omniglot-style 1-channel input
-            stats = summary(
-                model, input_size=(data_config["batch_size"], 1, 28, 28), verbose=0
-            )
-            f.write(str(stats))
-
-        # 6. Training Loop Logic
-        criterion = nn.CrossEntropyLoss()
-        history = []
-
-        for epoch in range(1, hyperparams["epochs"] + 1):
-            model.train()
-            train_loss, train_correct, train_total = 0.0, 0, 0
-
-            # Training Phase
-            for inputs, labels in loaders["train"]:
-                inputs, labels = inputs.to(device), labels.to(device)
-
-                optimizer.zero_grad()
-                outputs = model(inputs)
-                loss = criterion(outputs, labels)
-                loss.backward()
-
-                if "grad_clip" in hyperparams:
-                    torch.nn.utils.clip_grad_norm_(
-                        model.parameters(), hyperparams["grad_clip"]
-                    )
-
-                optimizer.step()
-
-                train_loss += loss.item()
-                _, predicted = outputs.max(1)
-                train_total += labels.size(0)
-                train_correct += predicted.eq(labels).sum().item()
-
-            # 7. Periodic Logging and Test Evaluation
-            if epoch % log_freq == 0 or epoch == 1:
-                model.eval()  # Set model to evaluation mode (Freezes Dropout/Batchnorm)
-                test_loss, test_correct, test_total = 0.0, 0, 0
-
-                with torch.no_grad():  # Disable gradient calculation for efficiency
-                    for inputs, labels in loaders["test"]:
-                        inputs, labels = inputs.to(device), labels.to(device)
-                        outputs = model(inputs)
-                        loss = criterion(outputs, labels)
-
-                        test_loss += loss.item()
-                        _, predicted = outputs.max(1)
-                        test_total += labels.size(0)
-                        test_correct += predicted.eq(labels).sum().item()
-
-                metrics = {
-                    "epoch": epoch,
-                    "train_loss": train_loss / len(loaders["train"]),
-                    "train_acc": train_correct / train_total,
-                    "test_loss": test_loss / len(loaders["test"]),
-                    "test_acc": test_correct / test_total,
-                }
-
-                history.append(metrics)
-                print(
-                    f"Epoch {epoch} | Train Acc: {metrics['train_acc']:.4f} | Test Acc: {metrics['test_acc']:.4f}"
-                )
-
-        # 8. Final Artifact Export
-        pd.DataFrame(history).to_csv(run_dir / "train_log.csv", index=False)
-        torch.save(
-            {
-                "model_state": model.state_dict(),
-                "optim_state": optimizer.state_dict(),
-                "hyperparams": hyperparams,
-                "seed": seed,
-            },
-            run_dir / "final_model.pth",
-        )
-
-        # Inside train_model, before json.dump:
-        # We create a copy so we don't break the actual 'live' dictionary
-        saveable_data_config = data_config.copy()
-
-        # Convert the Compose object into a readable string
-        if "transform" in saveable_data_config:
-            saveable_data_config["transform"] = str(saveable_data_config["transform"])
-
-        # Save exact configuration for audit trail
-        config_dump = {
-            "model": model_name,
-            "model_params": model_params,
-            "optimizer": optim_class.__name__,
-            "optimizer_params": optim_params,
-            "hyperparams": hyperparams,
-            "data_config": saveable_data_config,
-            "seed": seed,
-        }
-        with open(run_dir / "run_config.json", "w") as f:
-            json.dump(config_dump, f, indent=4)
-
-        return model, run_dir
-
-    except Exception as e:
-        # If it crashes, print the error so it's caught in the log too
-        print(f"\nFATAL ERROR during run: {e}")
-        raise e  # Re-raise so we see the traceback
-
-    finally:
-        # RESTORE THE TERMINAL
-        sys.stdout = original_stdout
-        if logger is not None:
-            logger.close()
-        print(f"--- Run Complete. Console logging detached ---")
-
-
-def train_model_ht(
     model_input,
     ht_config,
     model_params,
@@ -295,7 +127,7 @@ def train_model_ht(
             checkpoint_dir = run_dir / "checkpoints"
             checkpoint_dir.mkdir(exist_ok=True)
             save_half_precision(
-                model.state_dict(), checkpoint_dir / f"weights_epoch_0.pth"
+                model.state_dict(), checkpoint_dir / "weights_epoch_0.pth"
             )
 
         # 6. Training Loop Logic
@@ -303,37 +135,15 @@ def train_model_ht(
         history = []
 
         # --- Epoch 0: Initial Evaluation ---
-        model.eval()
-        train_loss, train_correct, train_total = 0.0, 0, 0
-        test_loss, test_correct, test_total = 0.0, 0, 0
-
-        with torch.no_grad():
-            # Evaluate on train set
-            for inputs, labels in loaders["train"]:
-                inputs, labels = inputs.to(device), labels.to(device)
-                outputs = model(inputs)
-                loss = criterion(outputs, labels)
-                train_loss += loss.item()
-                _, predicted = outputs.max(1)
-                train_total += labels.size(0)
-                train_correct += predicted.eq(labels).sum().item()
-
-            # Evaluate on test set
-            for inputs, labels in loaders["test"]:
-                inputs, labels = inputs.to(device), labels.to(device)
-                outputs = model(inputs)
-                loss = criterion(outputs, labels)
-                test_loss += loss.item()
-                _, predicted = outputs.max(1)
-                test_total += labels.size(0)
-                test_correct += predicted.eq(labels).sum().item()
+        train_m = evaluate_model(model, loaders["train"], device, criterion)
+        test_m = evaluate_model(model, loaders["test"], device, criterion)
 
         metrics_0 = {
             "epoch": 0,
-            "train_loss": train_loss / len(loaders["train"]),
-            "train_acc": train_correct / train_total,
-            "test_loss": test_loss / len(loaders["test"]),
-            "test_acc": test_correct / test_total,
+            "train_loss": train_m["loss"],
+            "train_acc": train_m["acc"],
+            "test_loss": test_m["loss"],
+            "test_acc": test_m["acc"],
         }
         history.append(metrics_0)
         sys.stdout.log.write(
@@ -376,27 +186,14 @@ def train_model_ht(
 
             # 7. Periodic Logging and Test Evaluation
             if epoch % log_freq == 0:
-                model.eval()
-                test_loss, test_correct, test_total = 0.0, 0, 0
-
-                with torch.no_grad():
-                    # A. Standard Cross-Entropy Validation
-                    for inputs, labels in loaders["test"]:
-                        inputs, labels = inputs.to(device), labels.to(device)
-                        outputs = model(inputs)
-                        loss = criterion(outputs, labels)
-
-                        test_loss += loss.item()
-                        _, predicted = outputs.max(1)
-                        test_total += labels.size(0)
-                        test_correct += predicted.eq(labels).sum().item()
+                test_metrics = evaluate_model(model, loaders["test"], device, criterion)
 
                 metrics = {
                     "epoch": epoch,
-                    "train_loss": train_loss / len(loaders["train"]),
-                    "train_acc": train_correct / train_total,
-                    "test_loss": test_loss / len(loaders["test"]),
-                    "test_acc": test_correct / test_total,
+                    "train_loss": current_train_loss,
+                    "train_acc": current_train_acc,
+                    "test_loss": test_metrics["loss"],
+                    "test_acc": test_metrics["acc"],
                 }
 
                 history.append(metrics)
@@ -468,7 +265,7 @@ def train_model_ht(
         sys.stdout = original_stdout
         if logger is not None:
             logger.close()
-        print(f"--- Run Complete. Console logging detached ---")
+        print("--- Run Complete. Console logging detached ---")
 
 
 def run_experiment(config_path="config.yaml", num_seeds=1):
@@ -496,7 +293,7 @@ def run_experiment(config_path="config.yaml", num_seeds=1):
 
         # --- RUN A: HEAVY-TAILED EXPERIMENT ---
         print(f"Running HT Experiment (alpha={ht_config['alpha']})...")
-        train_model_ht(
+        train_model(
             model_input=cfg["model_class"],
             ht_config=ht_config,
             model_params=cfg["model_params"],
@@ -556,7 +353,7 @@ def run_parameter_sweep(config_path="sweep_config.yaml", num_seeds=1):
             current_ht_config["g"] = g
 
             # Execute training using the verified library wrapper
-            train_model_ht(
+            train_model(
                 model_input=cfg["model_class"],
                 ht_config=current_ht_config,
                 model_params=cfg["model_params"],
