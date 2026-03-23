@@ -6,7 +6,9 @@ import pandas as pd
 import json
 import re
 import gc
+import os
 from pathlib import Path
+from collections import defaultdict, deque
 from scipy.optimize import curve_fit
 from .equations import (
     hill_estimator,
@@ -25,6 +27,86 @@ from .utils import (
     apply_spectral_filter_to_model,
     evaluate_model,
 )
+
+
+class LayerWiseTAMSDTracker:
+    """
+    Optimized TAMSD tracker for high-end GPUs.
+    Tracks multiple lag times (tau) across all layers simultaneously.
+    """
+
+    def __init__(self, model, lags=[1, 2, 4, 8, 16, 32, 64, 128]):
+        self.lags = sorted(lags)
+        self.max_lag = max(self.lags)
+        self.layer_names = [n for n, p in model.named_parameters() if p.requires_grad]
+
+        # History of flattened weight vectors (keep on GPU!)
+        self.history = deque(maxlen=self.max_lag + 1)
+
+        # Storage for raw data: {layer_name: {tau: [list_of_displacements]}}
+        self.raw_data = {
+            name: {tau: [] for tau in self.lags} for name in self.layer_names
+        }
+
+    @torch.no_grad()
+    def update(self, model):
+        # 1. Capture current state as a dict of flattened tensors (stay on GPU)
+        current_state = {
+            n: p.detach().clone().view(-1)
+            for n, p in model.named_parameters()
+            if p.requires_grad
+        }
+
+        # 2. Add to history
+        self.history.append(current_state)
+        current_idx = len(self.history) - 1
+
+        # 3. Compute displacements for all requested lags
+        for tau in self.lags:
+            prev_idx = current_idx - tau
+            if prev_idx >= 0:
+                past_state = self.history[prev_idx]
+
+                for name in self.layer_names:
+                    # Square Displacement (Sum of squared differences)
+                    # We use .sum() because MSD is technically ||w(t+tau) - w(t)||^2
+                    sq_dist = torch.sum(
+                        (current_state[name] - past_state[name]) ** 2
+                    ).item()
+                    self.raw_data[name][tau].append(sq_dist)
+
+    def save_raw_data(self, output_path="logs/tamsd_results.json"):
+        """
+        Saves the full history of squared displacements to a specific path.
+        Creates directories if they do not exist.
+        """
+        # 1. Ensure the directory exists
+        dir_name = os.path.dirname(output_path)
+        if dir_name and not os.path.exists(dir_name):
+            os.makedirs(dir_name)
+
+        # 2. Final sanitization (ensure everything is a serializable float)
+        # This is a safety check in case any .item() calls were missed
+        serializable_data = {
+            name: {str(tau): [float(v) for v in vals] for tau, vals in tau_dict.items()}
+            for name, tau_dict in self.raw_data.items()
+        }
+
+        # 3. Save to the specified path
+        with open(output_path, "w") as f:
+            json.dump(serializable_data, f, indent=4)
+
+        print(f"Raw TAMSD data successfully synced to: {os.path.abspath(output_path)}")
+
+    def get_averages(self):
+        """Computes the final TAMSD (mean) for each tau and layer."""
+        averages = {}
+        for name in self.layer_names:
+            averages[name] = {
+                tau: (sum(vals) / len(vals)) if vals else 0
+                for tau, vals in self.raw_data[name].items()
+            }
+        return averages
 
 
 def get_singular_values(matrix):
@@ -152,11 +234,7 @@ def collect_sweep_metrics(sweep_dir, output_name="sweep_metrics.csv"):
                     # If final snapshot, we downcast to bfloat16 first to avoid artifacts
                     w0 = w0_dict[key].numpy()
                     if "final_model" in ckpt.name:
-                        w_np = (
-                            tensor.to(torch.bfloat16)
-                            .to(torch.float32)
-                            .numpy()
-                        )
+                        w_np = tensor.to(torch.bfloat16).to(torch.float32).numpy()
                     else:
                         w_np = tensor.to(torch.float32).numpy()
 
@@ -183,6 +261,192 @@ def collect_sweep_metrics(sweep_dir, output_name="sweep_metrics.csv"):
     df.to_csv(output_name, index=False)
     print(f"Done! Results saved to {output_name}")
     return df
+
+
+def collect_tamsd_snapshots(sweep_dir, output_name="tamsd_metrics.csv"):
+    sweep_path = Path(sweep_dir)
+    all_results = []
+
+    config_files = list(sweep_path.rglob("run_config.json"))
+
+    for cfg_path in config_files:
+        run_dir = cfg_path.parent
+        ckpt_dir = run_dir / "checkpoints"
+
+        with open(cfg_path, "r") as f:
+            cfg = json.load(f)
+
+        metadata = {
+            "run_id": run_dir.name,
+            "alpha": cfg["ht_config"].get("alpha"),
+            "sigma": cfg["ht_config"].get("g"),
+        }
+
+        # 1. Identify and Sort all checkpoints
+        ckpts = list(ckpt_dir.glob("weights_epoch_*.pth"))
+        ckpts.sort(key=lambda x: int(re.search(r"epoch_(\d+)", x.name).group(1)))
+
+        final_pth = ckpt_dir / "final_model.pth"
+        if final_pth.exists():
+            ckpts.append(final_pth)
+
+        # 2. LOAD EVERYTHING into a dictionary of lists: {layer_name: [tensor_e0, tensor_e1, ...]}
+        # We also need the epoch values to calculate the Lags (Delta)
+        layer_histories = defaultdict(list)
+        epoch_values = []
+
+        for ckpt_path in ckpts:
+            # Determine epoch
+            if "final_model" in ckpt_path.name:
+                epoch_val = cfg["hyperparams"].get("epochs")
+            else:
+                epoch_val = int(re.search(r"epoch_(\d+)", ckpt_path.name).group(1))
+            epoch_values.append(epoch_val)
+
+            checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+            state_dict = checkpoint.get(
+                "model_state", checkpoint.get("state_dict", checkpoint)
+            )
+
+            for key, tensor in state_dict.items():
+                if "weight" in key:
+                    # THE PARITY FIX:
+                    # Force everything through the bfloat16 bottleneck to match
+                    # the low-precision snapshots, then calculate in float32.
+                    equalized_tensor = (
+                        tensor.to(torch.bfloat16)  # Drop the extra bits
+                        .to(torch.float32)  # Convert back for math stability
+                        .view(-1)  # Flatten
+                    )
+                    layer_histories[key].append(equalized_tensor)
+            del checkpoint
+
+        # 3. COMPUTE TAMSD PER LAYER
+        for layer_name, tensors in layer_histories.items():
+            # Stack into (45, num_params)
+            stacked = torch.stack(tensors)
+
+            # Vectorized Pairwise Distance: ||a-b||^2 = ||a||^2 + ||b||^2 - 2<a,b>
+            dist_matrix = torch.cdist(stacked, stacked, p=2) ** 2
+
+            # 4. BINNING LOGIC
+            bin_accumulator = defaultdict(list)
+            num_snapshots = len(epoch_values)
+
+            for i in range(num_snapshots):
+                for j in range(i + 1, num_snapshots):
+                    delta_t = epoch_values[j] - epoch_values[i]
+                    d_squared = dist_matrix[i, j].item()
+                    bin_accumulator[delta_t].append(d_squared)
+
+            # Average the bins and record
+            for delta_t, values in bin_accumulator.items():
+                all_results.append(
+                    {
+                        **metadata,
+                        "layer": layer_name,
+                        "delta_t": delta_t,
+                        "msd": np.mean(values),
+                        "std_msd": np.std(values),
+                        "pair_count": len(values),
+                    }
+                )
+
+        print(f"Processed run: {run_dir.name}")
+
+    # Save to CSV
+    df = pd.DataFrame(all_results)
+    df.to_csv(output_name, index=False)
+    return df
+
+
+def collect_tamsd_from_json(sweep_dir, output_name="tamsd_metrics.csv"):
+    """
+    Reads the high-resolution TAMSD JSON files from each run directory
+    and aggregates them into a single CSV.
+    """
+    sweep_path = Path(sweep_dir)
+    all_results = []
+
+    # Find all run_config files
+    config_files = list(sweep_path.rglob("run_config.json"))
+
+    for cfg_path in config_files:
+        run_dir = cfg_path.parent
+        tamsd_json_path = run_dir / "tamsd_results.json"
+
+        # Load Run Config for Hyperparameters
+        with open(cfg_path, "r") as f:
+            cfg = json.load(f)
+
+        # Extracting alpha and g (sigma) for the unique identifier
+        alpha = cfg["ht_config"].get("alpha", "unknown")
+        g_val = cfg["ht_config"].get("g", "unknown")
+
+        # Create a unique label based on the physics parameters
+        run_label = f"alpha_{alpha}_g_{g_val}"
+
+        metadata = {
+            "run_id": run_label, # Replaced folder name with param string
+            "alpha": alpha,
+            "sigma": g_val,
+            "lr": cfg["hyperparams"].get("lr"),
+        }
+
+        # Load the raw squared distances
+        with open(tamsd_json_path, "r") as f:
+            raw_tamsd_data = json.load(f)
+
+        global_sums = defaultdict(lambda: None)
+
+        for layer_name, tau_dict in raw_tamsd_data.items():
+            for delta_t_str, squared_distances in tau_dict.items():
+                if not squared_distances:
+                    continue
+
+                delta_t = int(delta_t_str)
+                dists = np.array(squared_distances)
+                if global_sums[delta_t] is None:
+                    global_sums[delta_t] = dists
+                else:
+                    global_sums[delta_t] += dists
+
+                # Stats calculation
+                msd_val = np.mean(squared_distances)
+                std_val = np.std(squared_distances)
+                count = len(squared_distances)
+
+                all_results.append({
+                    **metadata,
+                    "layer": layer_name,
+                    "delta_t": delta_t,
+                    "msd": msd_val,
+                    "std_msd": std_val,
+                    "pair_count": count
+                })
+        # Add the Global Row
+        for d_t, total_dists in global_sums.items():
+            all_results.append({
+                **metadata,
+                "layer": "GLOBAL_MODEL",
+                "delta_t": d_t,
+                "msd": np.mean(total_dists),
+                "std_msd": np.std(total_dists),
+                "pair_count": len(total_dists)
+            })
+
+        print(f"Processed: {run_label}")
+
+    if all_results:
+        df = pd.DataFrame(all_results)
+        # Sorting by params ensures the CSV is organized by "physics"
+        df = df.sort_values(by=["alpha", "sigma", "layer", "delta_t"])
+        df.to_csv(output_name, index=False)
+        print(f"\nSaved aggregated metrics to {output_name}")
+        return df
+    else:
+        print("No results found.")
+        return None
 
 
 def get_hill_plot(weights, max_k_fraction=0.1, min_k=10):

@@ -9,6 +9,7 @@ from datetime import datetime
 from torchinfo import summary
 from pathlib import Path
 from tqdm import tqdm
+from .analysis import LayerWiseTAMSDTracker
 from .utils import (
     model_factory,
     set_seed,
@@ -120,12 +121,12 @@ def train_model(
             stats = summary(model, input_size=input_shape, verbose=0)
             f.write(str(stats))
 
+        checkpoint_dir = run_dir / "checkpoints"
+        checkpoint_dir.mkdir(exist_ok=True)
         # 5.1. Initial Weight Snapshot
         if hyperparams.get("save_weights_history", False) and 0 in hyperparams.get(
             "weight_log_epochs", []
         ):
-            checkpoint_dir = run_dir / "checkpoints"
-            checkpoint_dir.mkdir(exist_ok=True)
             save_half_precision(
                 model.state_dict(), checkpoint_dir / "weights_epoch_0.pth"
             )
@@ -133,6 +134,8 @@ def train_model(
         # 6. Training Loop Logic
         criterion = nn.CrossEntropyLoss()
         history = []
+
+        tamsd_tracker = LayerWiseTAMSDTracker(model, lags=[1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128])
 
         # --- Epoch 0: Initial Evaluation ---
         train_m = evaluate_model(model, loaders["train"], device, criterion)
@@ -183,6 +186,8 @@ def train_model(
 
             current_train_acc = train_correct / train_total
             current_train_loss = train_loss / len(loaders["train"])
+
+            tamsd_tracker.update(model)
 
             # 7. Periodic Logging and Test Evaluation
             if epoch % log_freq == 0:
@@ -252,6 +257,8 @@ def train_model(
         }
         with open(run_dir / "run_config.json", "w") as f:
             json.dump(config_dump, f, indent=4)
+
+        tamsd_tracker.save_raw_data(str(run_dir / "tamsd_results.json"))
 
         return model, run_dir
 
