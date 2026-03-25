@@ -6,10 +6,11 @@ import pandas as pd
 import json
 import re
 import gc
-import os
+import dcor
 from pathlib import Path
 from collections import defaultdict, deque
 from scipy.optimize import curve_fit
+from scipy.stats import pearsonr, spearmanr
 from .equations import (
     hill_estimator,
     relative_frobenius_norm,
@@ -448,6 +449,89 @@ def collect_tamsd_from_json(sweep_dir, output_name="tamsd_metrics.csv"):
         print("No results found.")
         return None
 
+
+def collect_correlations_from_json(sweep_dir, method="spearman", output_name="layer_correlations.csv"):
+    """
+    Computes a 10x10 correlation matrix for each lag time (delta_t) across runs.
+    Methods: 'pearson', 'spearman', or 'dcor'
+    """
+    sweep_path = Path(sweep_dir)
+    all_results = []
+
+    if method == "dcor" and dcor is None:
+        raise ImportError("Package 'dcor' is required for distance correlation.")
+
+    config_files = list(sweep_path.rglob("run_config.json"))
+
+    for cfg_path in config_files:
+        run_dir = cfg_path.parent
+        tamsd_json_path = run_dir / "tamsd_results.json"
+
+        if not tamsd_json_path.exists():
+            continue
+
+        with open(cfg_path, "r") as f:
+            cfg = json.load(f)
+
+        # Metadata
+        alpha = cfg["ht_config"].get("alpha", "unknown")
+        g_val = cfg["ht_config"].get("g", "unknown")
+        metadata = {"alpha": alpha, "sigma": g_val, "run_id": f"alpha_{alpha}_g_{g_val}"}
+
+        with open(tamsd_json_path, "r") as f:
+            raw_data = json.load(f)
+
+        # 1. Organize data by delta_t: {delta_t: {layer_name: [displacements]}}
+        layers = sorted([l for l in raw_data.keys() if l != "GLOBAL_MODEL"])
+        lags = sorted(map(int, raw_data[layers[0]].keys()))
+
+        for tau in lags:
+            num_layers = len(layers)
+            corr_matrix = np.eye(num_layers) # Diagonal is always 1
+
+            # 2. Compute Upper Triangle
+            for i in range(num_layers):
+                for j in range(i + 1, num_layers):
+                    vec_i = np.array(raw_data[layers[i]][str(tau)])
+                    vec_j = np.array(raw_data[layers[j]][str(tau)])
+
+                    # Skip if vectors are empty or contain NaNs
+                    if len(vec_i) < 2 or len(vec_j) < 2:
+                        val = np.nan
+                    else:
+                        if method == "pearson":
+                            val, _ = pearsonr(vec_i, vec_j)
+                        elif method == "spearman":
+                            val, _ = spearmanr(vec_i, vec_j)
+                        elif method == "dcor":
+                            val = dcor.distance_correlation(vec_i, vec_j)
+                        else:
+                            val = 0
+
+                    corr_matrix[i, j] = val
+                    corr_matrix[j, i] = val # Symmetry
+
+            # 3. Flatten matrix into rows for the CSV
+            # We save the full matrix info so we can reconstruct heatmaps later
+            for i, l_i in enumerate(layers):
+                for j, l_j in enumerate(layers):
+                    all_results.append({
+                        **metadata,
+                        "delta_t": tau,
+                        "method": method,
+                        "layer_A": l_i,
+                        "layer_B": l_j,
+                        "correlation": corr_matrix[i, j]
+                    })
+
+        print(f"Processed Correlations ({method}) for: {metadata['run_id']}")
+
+    if all_results:
+        df = pd.DataFrame(all_results)
+        df.to_csv(output_name, index=False)
+        print(f"Success! Saved to {output_name}")
+        return df
+    return None
 
 def get_hill_plot(weights, max_k_fraction=0.1, min_k=10):
     # 1. Standardize and Flatten
