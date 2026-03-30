@@ -135,7 +135,7 @@ def train_model(
         criterion = nn.CrossEntropyLoss()
         history = []
 
-        tamsd_tracker = LayerWiseTAMSDTracker(model, lags=[1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128])
+        tamsd_tracker = LayerWiseTAMSDTracker(model, lags=[1, 2, 4, 8, 16, 32, 64, 128])
 
         # --- Epoch 0: Initial Evaluation ---
         train_m = evaluate_model(model, loaders["train"], device, criterion)
@@ -179,6 +179,8 @@ def train_model(
 
                 optimizer.step()
 
+                tamsd_tracker.update(model)
+
                 train_loss += loss.item()
                 _, predicted = outputs.max(1)
                 train_total += labels.size(0)
@@ -186,8 +188,6 @@ def train_model(
 
             current_train_acc = train_correct / train_total
             current_train_loss = train_loss / len(loaders["train"])
-
-            tamsd_tracker.update(model)
 
             # 7. Periodic Logging and Test Evaluation
             if epoch % log_freq == 0:

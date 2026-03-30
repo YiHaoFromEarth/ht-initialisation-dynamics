@@ -7,6 +7,7 @@ import json
 import re
 import gc
 import dcor
+import os
 from pathlib import Path
 from collections import defaultdict, deque
 from scipy.optimize import curve_fit
@@ -51,30 +52,23 @@ class LayerWiseTAMSDTracker:
 
     @torch.no_grad()
     def update(self, model):
-        # 1. Capture current state as a dict of flattened tensors (stay on GPU)
+        # Capture state on GPU
         current_state = {
             n: p.detach().clone().view(-1)
-            for n, p in model.named_parameters()
-            if p.requires_grad
+            for n, p in model.named_parameters() if p.requires_grad
         }
-
-        # 2. Add to history
         self.history.append(current_state)
-        current_idx = len(self.history) - 1
 
-        # 3. Compute displacements for all requested lags
+        # Calculate displacements
         for tau in self.lags:
-            prev_idx = current_idx - tau
-            if prev_idx >= 0:
-                past_state = self.history[prev_idx]
-
+            if len(self.history) > tau:
+                past_state = self.history[-(tau + 1)]
                 for name in self.layer_names:
-                    # Square Displacement (Sum of squared differences)
-                    # We use .sum() because MSD is technically ||w(t+tau) - w(t)||^2
-                    sq_dist = torch.sum(
-                        (current_state[name] - past_state[name]) ** 2
-                    ).item()
-                    self.raw_data[name][tau].append(sq_dist)
+                    # Square Displacement: stay on GPU for the math!
+                    diff = current_state[name] - past_state[name]
+                    sq_dist = torch.sum(diff * diff)
+                    # Only use .item() at the very end to log
+                    self.raw_data[name][tau].append(sq_dist.item())
 
     def save_raw_data(self, output_path="logs/tamsd_results.json"):
         """
@@ -368,75 +362,53 @@ def collect_tamsd_from_json(sweep_dir, output_name="tamsd_metrics.csv"):
     """
     sweep_path = Path(sweep_dir)
     all_results = []
-
-    # Find all run_config files
     config_files = list(sweep_path.rglob("run_config.json"))
 
     for cfg_path in config_files:
         run_dir = cfg_path.parent
         tamsd_json_path = run_dir / "tamsd_results.json"
+        if not tamsd_json_path.exists(): continue
 
-        # Load Run Config for Hyperparameters
         with open(cfg_path, "r") as f:
             cfg = json.load(f)
 
-        # Extracting alpha and g (sigma) for the unique identifier
-        alpha = cfg["ht_config"].get("alpha", "unknown")
-        g_val = cfg["ht_config"].get("g", "unknown")
+        # Metadata Setup
+        alpha, g_val = cfg["ht_config"].get("alpha", "unknown"), cfg["ht_config"].get("g", "unknown")
+        metadata = {"run_id": f"alpha_{alpha}_g_{g_val}", "alpha": alpha, "sigma": g_val, "lr": cfg["hyperparams"].get("lr")}
 
-        # Create a unique label based on the physics parameters
-        run_label = f"alpha_{alpha}_g_{g_val}"
-
-        metadata = {
-            "run_id": run_label, # Replaced folder name with param string
-            "alpha": alpha,
-            "sigma": g_val,
-            "lr": cfg["hyperparams"].get("lr"),
-        }
-
-        # Load the raw squared distances
         with open(tamsd_json_path, "r") as f:
-            raw_tamsd_data = json.load(f)
+            raw_data = json.load(f)
 
-        global_sums = defaultdict(lambda: None)
+        # Identify layers (excluding global) and available time lags
+        layers = sorted([l for l in raw_data.keys() if l != "GLOBAL_MODEL"])
+        lags = sorted(raw_data[layers[0]].keys(), key=int)
 
-        for layer_name, tau_dict in raw_tamsd_data.items():
-            for delta_t_str, squared_distances in tau_dict.items():
-                if not squared_distances:
-                    continue
+        for tau_str in lags:
+            # 1. Vectorized Stack: Convert all layers for this tau into a 2D Matrix
+            # Shape: [Num_Layers, Num_Steps]
+            matrix = np.array([raw_data[l][tau_str] for l in layers])
 
-                delta_t = int(delta_t_str)
-                dists = np.array(squared_distances)
-                if global_sums[delta_t] is None:
-                    global_sums[delta_t] = dists
-                else:
-                    global_sums[delta_t] += dists
+            # 2. Calculate Layer-wise Stats (Vectorized across axis 1)
+            means = matrix.mean(axis=1)
+            stds = matrix.std(axis=1)
+            count = matrix.shape[1]
 
-                # Stats calculation
-                msd_val = np.mean(squared_distances)
-                std_val = np.std(squared_distances)
-                count = len(squared_distances)
-
+            for idx, layer_name in enumerate(layers):
                 all_results.append({
-                    **metadata,
-                    "layer": layer_name,
-                    "delta_t": delta_t,
-                    "msd": msd_val,
-                    "std_msd": std_val,
-                    "pair_count": count
+                    **metadata, "layer": layer_name, "delta_t": int(tau_str),
+                    "msd": means[idx], "std_msd": stds[idx], "pair_count": count
                 })
-        # Add the Global Row
-        for d_t, total_dists in global_sums.items():
+
+            # 3. Calculate Global Stats (Vectorized across the entire matrix)
             all_results.append({
-                **metadata,
-                "layer": "GLOBAL_MODEL",
-                "delta_t": d_t,
-                "msd": np.mean(total_dists),
-                "std_msd": np.std(total_dists),
-                "pair_count": len(total_dists)
+                **metadata, "layer": "GLOBAL_MODEL", "delta_t": int(tau_str),
+                "msd": matrix.mean(), # Mean of all elements
+                "std_msd": matrix.std(),
+                "pair_count": matrix.size # Total elements
             })
 
-        print(f"Processed: {run_label}")
+        # Explicitly clear raw_data from RAM before next file
+        del raw_data
 
     if all_results:
         df = pd.DataFrame(all_results)
@@ -458,22 +430,17 @@ def collect_correlations_from_json(sweep_dir, method="spearman", output_name="la
     sweep_path = Path(sweep_dir)
     all_results = []
 
-    if method == "dcor" and dcor is None:
-        raise ImportError("Package 'dcor' is required for distance correlation.")
-
     config_files = list(sweep_path.rglob("run_config.json"))
 
     for cfg_path in config_files:
         run_dir = cfg_path.parent
         tamsd_json_path = run_dir / "tamsd_results.json"
-
-        if not tamsd_json_path.exists():
-            continue
+        if not tamsd_json_path.exists(): continue
 
         with open(cfg_path, "r") as f:
             cfg = json.load(f)
 
-        # Metadata
+        # Metadata extraction
         alpha = cfg["ht_config"].get("alpha", "unknown")
         g_val = cfg["ht_config"].get("g", "unknown")
         metadata = {"alpha": alpha, "sigma": g_val, "run_id": f"alpha_{alpha}_g_{g_val}"}
@@ -481,38 +448,41 @@ def collect_correlations_from_json(sweep_dir, method="spearman", output_name="la
         with open(tamsd_json_path, "r") as f:
             raw_data = json.load(f)
 
-        # 1. Organize data by delta_t: {delta_t: {layer_name: [displacements]}}
         layers = sorted([l for l in raw_data.keys() if l != "GLOBAL_MODEL"])
         lags = sorted(map(int, raw_data[layers[0]].keys()))
+        num_layers = len(layers)
 
         for tau in lags:
-            num_layers = len(layers)
-            corr_matrix = np.eye(num_layers) # Diagonal is always 1
+            tau_str = str(tau)
 
-            # 2. Compute Upper Triangle
-            for i in range(num_layers):
-                for j in range(i + 1, num_layers):
-                    vec_i = np.array(raw_data[layers[i]][str(tau)])
-                    vec_j = np.array(raw_data[layers[j]][str(tau)])
+            # --- STEP 1: Vectorized Data Loading ---
+            # Create a 2D matrix [Layers x Steps]
+            # This is done once per tau, rather than inside the i/j loop
+            data_matrix = np.array([raw_data[l][tau_str] for l in layers])
 
-                    # Skip if vectors are empty or contain NaNs
-                    if len(vec_i) < 2 or len(vec_j) < 2:
-                        val = np.nan
-                    else:
-                        if method == "pearson":
-                            val, _ = pearsonr(vec_i, vec_j)
-                        elif method == "spearman":
+            # --- STEP 2: Matrix Correlation ---
+            if method == "pearson":
+                # np.corrcoef calculates the entire matrix in one optimized call
+                corr_matrix = np.corrcoef(data_matrix)
+
+            else:
+                # For Spearman or dcor, we still need a loop, but we use the
+                # pre-computed data_matrix to avoid repetitive casting
+                corr_matrix = np.eye(num_layers)
+                for i in range(num_layers):
+                    for j in range(i + 1, num_layers):
+                        vec_i, vec_j = data_matrix[i], data_matrix[j]
+
+                        if method == "spearman":
                             val, _ = spearmanr(vec_i, vec_j)
                         elif method == "dcor":
                             val = dcor.distance_correlation(vec_i, vec_j)
                         else:
                             val = 0
 
-                    corr_matrix[i, j] = val
-                    corr_matrix[j, i] = val # Symmetry
+                        corr_matrix[i, j] = corr_matrix[j, i] = val
 
-            # 3. Flatten matrix into rows for the CSV
-            # We save the full matrix info so we can reconstruct heatmaps later
+            # --- STEP 3: Flattening for Storage ---
             for i, l_i in enumerate(layers):
                 for j, l_j in enumerate(layers):
                     all_results.append({
@@ -524,14 +494,15 @@ def collect_correlations_from_json(sweep_dir, method="spearman", output_name="la
                         "correlation": corr_matrix[i, j]
                     })
 
-        print(f"Processed Correlations ({method}) for: {metadata['run_id']}")
+        print(f"Processed Correlations ({method}): {metadata['run_id']}")
+        del raw_data # Free RAM
 
     if all_results:
         df = pd.DataFrame(all_results)
         df.to_csv(output_name, index=False)
-        print(f"Success! Saved to {output_name}")
         return df
     return None
+
 
 def get_hill_plot(weights, max_k_fraction=0.1, min_k=10):
     # 1. Standardize and Flatten
