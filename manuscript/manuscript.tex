@@ -4,6 +4,8 @@
 \usepackage{amsfonts}
 \usepackage{amssymb}
 \usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{multirow}
 \usepackage[left=2cm,right=2cm,top=2cm,bottom=2cm]{geometry}
 \author{Yi Hao}
 \title{Training Dynamics of Heavy-Tailed Initilisation in Deep Learning}
@@ -90,9 +92,28 @@ The evolution of these metrics is analyzed across the network's depth to identif
 \section{Results}
 \begin{figure}[htbp]
     \centering
-    \includegraphics[width=0.8\textwidth]{dcor_correlations.pdf}
-    \caption{This is a vector-based plot saved as a PDF.}
+    \includegraphics[width=0.8\textwidth]{performance_runs.pdf}
+    \caption{Accuracy curves for 10-layer MLP trained on MNIST. Initialisation varies from Gaussian ($\alpha = 2.0$) to strongly heavy-tailed ($\alpha = 1.2$), while the three scale values of $\sigma = 0.25, 1.0, 3.0$ are chosen to represent the ordered, critical, and chaotic regimes respectively. Generalisation gap is highlighted in grey.}
     \label{fig:my_plot}
 \end{figure}
+
+\begin{table}[ht]
+\centering
+\caption{Final Performance Summary across Initialization Scales ($\sigma$) and Tail Thickness ($\alpha$).}
+\label{tab:performance_summary}
+\begin{tabular}{lccccr}
+\toprule
+\textbf{Scale ($\sigma$)} & \textbf{Tail ($\alpha$)} & \textbf{Train Acc} & \textbf{Test Acc} & \textbf{Gen. Gap ($\Delta$)} \\ \midrule
+\multirow{3}{*}{3.00} & 1.2 & 1.0000 & 0.9297 & 0.0703 \\
+                      & 1.5 & 1.0000 & 0.8855 & 0.1145\\
+                      & 2.0 (Base) & 1.0000 & 0.6164 & 0.3836\\ \hline
+\multirow{3}{*}{1.00} & 1.2 & 0.9999 & 0.9683 & 0.0316 \\
+                      & 1.5 & 0.9998 & 0.9692 & 0.0306 \\
+                      & 2.0 (Base) & 0.9982 & 0.9751 & 0.0231 \\ \hline
+\multirow{3}{*}{0.25} & 1.2 & 0.9932 & 0.9602 & 0.0330 \\
+                      & 1.5 & 0.9654 & 0.9365 & 0.0289 \\
+                      & 2.0 (Base) & 0.1522 & 0.1468 & 0.0054 \\ \bottomrule
+\end{tabular}
+\end{table}
 \section{Discussion}
 \end{document}
