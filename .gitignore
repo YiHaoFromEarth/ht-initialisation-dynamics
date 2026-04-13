@@ -247,3 +247,4 @@ old_results/
 thesis/thesis.pdf
 research_plan/research_plan.pdf
 tamsd_results.json
+*.parquet

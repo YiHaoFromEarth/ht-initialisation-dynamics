@@ -135,7 +135,8 @@ def train_model(
         criterion = nn.CrossEntropyLoss()
         history = []
 
-        tamsd_tracker = LayerWiseTAMSDTracker(model, lags=[1, 2, 4, 8, 16, 32, 64, 128])
+        step_tamsd_tracker = LayerWiseTAMSDTracker(model, lags=[1, 2, 4, 8, 16, 32])
+        epoch_tamsd_tracker = LayerWiseTAMSDTracker(model, lags=[1, 2, 4, 8, 16, 32, 64, 128])
 
         # --- Epoch 0: Initial Evaluation ---
         train_m = evaluate_model(model, loaders["train"], device, criterion)
@@ -179,13 +180,14 @@ def train_model(
 
                 optimizer.step()
 
-                tamsd_tracker.update(model)
+                step_tamsd_tracker.update(model)
 
                 train_loss += loss.item()
                 _, predicted = outputs.max(1)
                 train_total += labels.size(0)
                 train_correct += predicted.eq(labels).sum().item()
 
+            epoch_tamsd_tracker.update(model)
             current_train_acc = train_correct / train_total
             current_train_loss = train_loss / len(loaders["train"])
 
@@ -258,7 +260,21 @@ def train_model(
         with open(run_dir / "run_config.json", "w") as f:
             json.dump(config_dump, f, indent=4)
 
-        tamsd_tracker.save_raw_data(str(run_dir / "tamsd_results.json"))
+        # Extract metadata for the DataFrame
+        a_val = ht_config.get('alpha', 'N/A')
+        s_val = ht_config.get('g', 'N/A')
+
+        # 1. Get DataFrames from both trackers
+        df_step = step_tamsd_tracker.to_dataframe(a_val, s_val, scale=1)
+        df_epoch = epoch_tamsd_tracker.to_dataframe(a_val, s_val, scale=60000//1024)
+
+        # 2. Combine and Sort
+        # This creates one master 'Physics' file for the entire run
+        master_physics_df = pd.concat([df_step, df_epoch], ignore_index=True)
+        master_physics_df = master_physics_df.sort_values(by=["layer", "time_lag", "step"])
+
+        # 3. Save as a single Parquet (much better than JSON for this volume!)
+        master_physics_df.to_parquet(run_dir / "displacement_log.parquet")
 
         return model, run_dir
 

@@ -430,9 +430,8 @@ def collect_sweep_learning_curves(sweep_dir):
         run_log = pd.read_csv(log_path)
 
         # 4. Inject metadata into every row of this run
-        run_log["init_alpha"] = a_init
-        run_log["init_sigma"] = s_init
-        run_log["run_id"] = run_dir.parent.name  # e.g., alpha_2.0_sigma_3.0
+        run_log["alpha"] = a_init
+        run_log["sigma"] = s_init
 
         all_run_logs.append(run_log)
 

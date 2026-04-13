@@ -64,44 +64,41 @@ class LayerWiseTAMSDTracker:
             if len(self.history) > tau:
                 past_state = self.history[-(tau + 1)]
                 for name in self.layer_names:
-                    # Square Displacement: stay on GPU for the math!
                     diff = current_state[name] - past_state[name]
-                    sq_dist = torch.sum(diff * diff)
-                    # Only use .item() at the very end to log
-                    self.raw_data[name][tau].append(sq_dist.item())
 
-    def save_raw_data(self, output_path="logs/tamsd_results.json"):
+                    # 1. Net Movement (The Drift / Center of Mass)
+                    net_diff = torch.mean(diff).item()
+
+                    # 2. Absolute Movement (The Total Activity)
+                    abs_diff = torch.mean(torch.abs(diff)).item()
+
+                    # 3. Root Mean Square Movement (The Energy / Variance)
+                    rms_diff = torch.sqrt(torch.mean(diff ** 2)).item()
+
+                    # Log as a tuple or dict
+                    self.raw_data[name][tau].append((net_diff, abs_diff, rms_diff))
+
+    def to_dataframe(self, alpha, sigma, scale=1):
         """
-        Saves the full history of squared displacements to a specific path.
-        Creates directories if they do not exist.
+        Converts internal raw_data into a flattened DataFrame.
+        'scale' allows converting Epochs -> Steps automatically.
         """
-        # 1. Ensure the directory exists
-        dir_name = os.path.dirname(output_path)
-        if dir_name and not os.path.exists(dir_name):
-            os.makedirs(dir_name)
-
-        # 2. Final sanitization (ensure everything is a serializable float)
-        # This is a safety check in case any .item() calls were missed
-        serializable_data = {
-            name: {str(tau): [float(v) for v in vals] for tau, vals in tau_dict.items()}
-            for name, tau_dict in self.raw_data.items()
-        }
-
-        # 3. Save to the specified path
-        with open(output_path, "w") as f:
-            json.dump(serializable_data, f, indent=4)
-
-        print(f"Raw TAMSD data successfully synced to: {os.path.abspath(output_path)}")
-
-    def get_averages(self):
-        """Computes the final TAMSD (mean) for each tau and layer."""
-        averages = {}
-        for name in self.layer_names:
-            averages[name] = {
-                tau: (sum(vals) / len(vals)) if vals else 0
-                for tau, vals in self.raw_data[name].items()
-            }
-        return averages
+        rows = []
+        for layer, lags in self.raw_data.items():
+            for tau, values in lags.items():
+                unified_tau = int(tau) * scale
+                for step_idx, (net, l1, l2) in enumerate(values):
+                    rows.append({
+                        "alpha": alpha,
+                        "sigma": sigma,
+                        "layer": layer,
+                        "time_lag": unified_tau,
+                        "step": (step_idx + tau - (tau / 2)) * scale, # Centers the epoch movement
+                        "net_drift": net,
+                        "l1_dist": l1,
+                        "l2_dist": l2
+                    })
+        return pd.DataFrame(rows)
 
 
 def get_singular_values(matrix):
@@ -355,70 +352,65 @@ def collect_tamsd_snapshots(sweep_dir, output_name="tamsd_metrics.csv"):
     return df
 
 
-def collect_tamsd_from_json(sweep_dir, output_name="tamsd_metrics.csv"):
+def aggregate_displacement_sweep(sweep_dir, output_name="master_displacement_database.parquet"):
     """
-    Reads the high-resolution TAMSD JSON files from each run directory
-    and aggregates them into a single CSV.
+    Concatenates individual run-level Parquet files into a master research database.
+    Assumes each run directory contains a 'displacement_log.parquet' and 'run_config.json'.
     """
     sweep_path = Path(sweep_dir)
-    all_results = []
+    all_dfs = []
+
+    # 1. Locate all config files to identify valid runs
     config_files = list(sweep_path.rglob("run_config.json"))
+    print(f"Found {len(config_files)} potential runs. Commencing aggregation...")
 
     for cfg_path in config_files:
         run_dir = cfg_path.parent
-        tamsd_json_path = run_dir / "tamsd_results.json"
-        if not tamsd_json_path.exists(): continue
+        parquet_path = run_dir / "displacement_log.parquet"
 
+        if not parquet_path.exists():
+            print(f"Skipping {run_dir.name}: No parquet log found.")
+            continue
+
+        # 2. Load the metadata from config
         with open(cfg_path, "r") as f:
             cfg = json.load(f)
 
-        # Metadata Setup
-        alpha, g_val = cfg["ht_config"].get("alpha", "unknown"), cfg["ht_config"].get("g", "unknown")
-        metadata = {"run_id": f"alpha_{alpha}_g_{g_val}", "alpha": alpha, "sigma": g_val, "lr": cfg["hyperparams"].get("lr")}
+        # Pulling the key variables for your thesis analysis
+        alpha = cfg["ht_config"].get("alpha")
+        sigma = cfg["ht_config"].get("g")
+        seed = cfg.get("seed", "unknown")
 
-        with open(tamsd_json_path, "r") as f:
-            raw_data = json.load(f)
+        # 3. Load the run-level Parquet
+        # This is already structured with steps, layers, and displacements
+        run_df = pd.read_parquet(parquet_path)
 
-        # Identify layers (excluding global) and available time lags
-        layers = sorted([l for l in raw_data.keys() if l != "GLOBAL_MODEL"])
-        lags = sorted(raw_data[layers[0]].keys(), key=int)
+        # 4. Inject metadata for global identification
+        run_df["alpha"] = alpha
+        run_df["sigma"] = sigma
+        run_df["seed"] = seed
 
-        for tau_str in lags:
-            # 1. Vectorized Stack: Convert all layers for this tau into a 2D Matrix
-            # Shape: [Num_Layers, Num_Steps]
-            matrix = np.array([raw_data[l][tau_str] for l in layers])
+        all_dfs.append(run_df)
 
-            # 2. Calculate Layer-wise Stats (Vectorized across axis 1)
-            means = matrix.mean(axis=1)
-            stds = matrix.std(axis=1)
-            count = matrix.shape[1]
+    # 5. The "Big Bang" Concatenation
+    if all_dfs:
+        master_df = pd.concat(all_dfs, ignore_index=True)
 
-            for idx, layer_name in enumerate(layers):
-                all_results.append({
-                    **metadata, "layer": layer_name, "delta_t": int(tau_str),
-                    "msd": means[idx], "std_msd": stds[idx], "pair_count": count
-                })
+        # Enforce strict numeric types for physics queries
+        master_df["alpha"] = pd.to_numeric(master_df["alpha"], errors='coerce')
+        master_df["sigma"] = pd.to_numeric(master_df["sigma"], errors='coerce')
 
-            # 3. Calculate Global Stats (Vectorized across the entire matrix)
-            all_results.append({
-                **metadata, "layer": "GLOBAL_MODEL", "delta_t": int(tau_str),
-                "msd": matrix.mean(), # Mean of all elements
-                "std_msd": matrix.std(),
-                "pair_count": matrix.size # Total elements
-            })
+        # Save using ZSTD for better compression on these repetitive signals
+        master_df.to_parquet(output_name, engine='pyarrow', compression='zstd', index=False)
 
-        # Explicitly clear raw_data from RAM before next file
-        del raw_data
+        print("--- SUCCESS ---")
+        print(f"Master database saved to: {output_name}")
+        print(f"Total Rows: {len(master_df):,}")
+        print(f"Columns tracked: {list(master_df.columns)}")
 
-    if all_results:
-        df = pd.DataFrame(all_results)
-        # Sorting by params ensures the CSV is organized by "physics"
-        df = df.sort_values(by=["alpha", "sigma", "layer", "delta_t"])
-        df.to_csv(output_name, index=False)
-        print(f"\nSaved aggregated metrics to {output_name}")
-        return df
+        return master_df
     else:
-        print("No results found.")
+        print("Error: No dataframes found to combine.")
         return None
 
 
