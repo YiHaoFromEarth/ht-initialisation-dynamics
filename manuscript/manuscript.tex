@@ -8,11 +8,11 @@
 \usepackage{multirow}
 \usepackage[left=2cm,right=2cm,top=2cm,bottom=2cm]{geometry}
 \author{Yi Hao}
-\title{Training Dynamics of Heavy-Tailed Initilisation in Deep Learning}
+\title{Training Dynamics of Heavy-Tailed Initialisation in Deep Learning}
 \begin{document}
 \maketitle
 \section{Abstract}
-Conventional deep learning theory typically assumes Gaussian weight statistics, leading to narrow critical points that necessitate precise parameter fine-tuning. In contrast, recent analytical frameworks suggest that heavy-tailed initializations ($\alpha < 2$) enable the emergence of an extended critical regime. This regime provides significant computational advantages by balancing the contraction and expansion of internal neural representations across the network depth. This study investigates the non-equilibrium weight trajectories of a 10-layer MLP initialized at $\alpha = 1.2$ to identify the dynamical mechanisms underlying these advantages. Our preliminary observations reveal a profound spatial decoupling of learning dynamics: early hidden layers exhibit high-energy, symmetric displacement consistent with a diffusive stochastic reservoir, while terminal layers display sparse, high-magnitude upward spikes in displacement. We speculate that these terminal layers are in a directed ballistic state, where their movements are highly correlated with one another but functionally decoupled from the shallower layers. This hierarchical division of labor suggests that while early layers provide a stable foundation for signal propagation, the deep layers leverage extended criticality to perform the discrete, directed structural realignments, or Lévy flights that drive observed staircase improvements in classification performance.
+Conventional deep learning theory typically assumes Gaussian weight statistics, leading to narrow critical points that necessitate precise parameter fine-tuning. In contrast, recent analytical frameworks suggest that heavy-tailed initializations ($\alpha < 2$) enable the emergence of an extended critical regime. This regime provides significant computational advantages by balancing the contraction and expansion of internal neural representations across the network depth. This study investigates the non-equilibrium weight trajectories of a 10-layer MLP initialized at $\alpha = 1.2$ to identify the dynamical mechanisms underlying these advantages. Our preliminary observations reveal a profound spatial decoupling of learning dynamics: early hidden layers exhibit high-energy, symmetric displacement consistent with a diffusive stochastic reservoir, while terminal layers display sparse, high-magnitude upward spikes in displacement. We speculate that these terminal layers are in a directed ballistic state, where their movements are highly correlated with one another but functionally decoupled from the shallower layers. This hierarchical division of labour suggests that while early layers provide a stable foundation for signal propagation, the deep layers leverage extended criticality to perform the discrete, directed structural realignments, or Lévy flights that drive observed staircase improvements in classification performance.
 \section{Introduction}
 \section{Related Works}
 \section{Method}
@@ -45,6 +45,7 @@ Weight initialization is performed using a localized pseudo-random number genera
     W^l \leftarrow \text{Lévy\_Stable}(\alpha, \beta=0, \sigma, \text{seed} = S_{base} + l)
 \end{equation}
 By decoupling the random seeds across layers, we prevent the formation of correlated super-paths of outliers through the network depth. This ensures that the observed multifractal properties of the layerwise Jacobians are a result of the collective heavy-tailed dynamics rather than initialization artifacts.
+
 \subsection{Dynamical Observables: Layer-wise Displacement Tracking}
 
 To quantify the evolution of the network weight manifold during training, we define three primary scalar observables derived from the weight displacement vector. Let $W^l_t$ denote the weight matrix of layer $l$ at training step $t$. For a specific time lag $\tau$, the displacement matrix is defined as $\Delta W^l(t, \tau) = W^l_t - W^l_{t-\tau}$. These metrics allow us to distinguish between stochastic noise, collective drift, and high-energy structural realignments.
@@ -73,7 +74,7 @@ By squaring the displacements before averaging, the $L_2$ norm is significantly 
 \subsubsection{Multi-Scale Temporal Analysis}
 To separate microscopic noise from macroscopic learning, these metrics are tracked across two distinct time lag regimes:
 \begin{enumerate}
-    \item \textbf{Microscopic Lag ($\tau < 1$ epoch):} Captures the instantaneous stochastic gradient noise and the thermal floor of the initialization[cite: 480, 532].
+    \item \textbf{Microscopic Lag ($\tau < 1$ epoch):} Captures the instantaneous stochastic gradient noise and the thermal floor of the initialization.
     \item \textbf{Macroscopic Lag ($\tau \geq 1$ epoch):} Acts as a low-pass filter to reveal persistent structural drift and global phase transitions that are otherwise obscured by step-wise jitter.
 \end{enumerate}
 
@@ -92,7 +93,7 @@ where $\phi$ is the activation function. The specific architectural constraints 
 \begin{itemize}
     \item \textbf{Layer-wise Dimensions:} We maintain a constant hidden width of $N=784$ neurons for all layers $l \in \{1, \dots, L-1\}$. This configuration ensures that the weight matrices $W^l$ are square ($N \times N$), facilitating direct comparisons with results from Random Matrix Theory (RMT) and free probability.
     \item \textbf{Weights ($W$):} The weight matrices $W^l$ are initialized according to a symmetric $\alpha$-stable distribution. This initialization places the network within the extended critical regime, distinct from standard Gaussian ($\alpha=2$) initializations.
-    \item \textbf{Activation ($\phi$):} The hyperbolic tangent ($\tanh$) function is utilized for all hidden layers to ensure bounded signal propagation and centered activations.
+    \item \textbf{Activation ($\phi$):} The hyperbolic tangent ($\tanh$) function is utilized for all hidden layers to ensure bounded signal propagation and centred activations.
     \item \textbf{Biases ($b$):} All bias terms are explicitly disabled ($b^l=0$) to isolate the dynamical effects of the weight matrix couplings and simplify the analysis of the layer-wise Jacobians.
 \end{itemize}
 
@@ -115,7 +116,7 @@ The performance of the 10-layer MLP was evaluated across a $3 \times 3$ grid of 
     \label{fig:performance_curves}
 \end{figure}
 
-The training profiles across the $3\times3$ parameter sweep, as detailed in Figure \ref{fig:performance_curves} and Table \ref{tab:performance_summary}, exhibit dynamical behaviors consistent with the extended critical regime described in recent theoretical frameworks. 
+The training profiles across the $3\times3$ parameter sweep, as detailed in Figure \ref{fig:performance_curves} and Table \ref{tab:performance_summary}, exhibit dynamical behaviours consistent with the extended critical regime described in recent theoretical frameworks. 
 
 The training trajectories and final performance metrics, summarized in Table \ref{tab:performance_summary}, reveal distinct behaviours across the parameter space. Within the critical regime ($\sigma=1.0$), all configurations exhibit robust convergence. The Gaussian ($\alpha=2.0$) initialization achieves the highest test accuracy in this regime at 0.9751, followed closely by the heavy-tailed variants. However, as the system moves into the ordered and chaotic regimes, a significant divergence in performance emerges.
 
@@ -176,7 +177,7 @@ There appears to be a direct correlation between the stability of the test accur
 
 \subsection{Diffusion Regime Identification via TAMSD}
 
-To rigorously categorize the transport physics of the network, we analyze the Time-Averaged Mean Squared Displacement (TAMSD) on a log-log scale (Figure \ref{fig:tamsd_comparison}). The scaling exponent $\gamma$, defined by $\langle \Delta x^2 \rangle \sim \tau^\gamma$, provides a quantitative measure of the diffusion regime, where $\gamma = 1$ denotes Brownian motion, $\gamma < 1$ signifies sub-diffusion, and $\gamma \approx 2$ indicates ballistic or directed motion.
+To rigorously categorize the transport physics of the network, we analyse the Time-Averaged Mean Squared Displacement (TAMSD) on a log-log scale (Figure \ref{fig:tamsd_comparison}). The scaling exponent $\gamma$, defined by $\langle \Delta x^2 \rangle \sim \tau^\gamma$, provides a quantitative measure of the diffusion regime, where $\gamma = 1$ denotes Brownian motion, $\gamma < 1$ signifies sub-diffusion, and $\gamma \approx 2$ indicates ballistic or directed motion.
 
 \begin{figure}[htbp]
     \centering
@@ -191,9 +192,16 @@ In contrast, the first hidden layer $W^1$ displays a characteristic dynamical cr
 
 This observation supports the hypothesis of a hierarchical decoupling. The terminal layers operate as a directed engine, maintaining ballistic trajectories that drive classification performance. Meanwhile, the early layers function as a diffusive reservoir; while they are dominated by local stochasticity on microscopic scales, the emergence of super-diffusion over larger time horizons indicates a underlying directional gradient that provides a global guide for the learning process.
 
+\begin{figure}[htbp]
+    \centering
+    \includegraphics[width=0.8\textwidth]{diffusion_curve.pdf}
+    \caption{Layer-wise correlation matrices of $L_2$ displacements ($\tau=1$). The emergence of distinct block-diagonal structures indicates a functional decoupling between the diffusive shallow layers and the ballistic terminal engine.}
+    \label{fig:correlations}
+\end{figure}
+
 \subsection{Statistical Signatures of Hierarchical Decoupling}
 
-To evaluate the collective behavior of the network, we analyze the cross-correlation of $L_2$ displacements across all layers using a trinity of metrics: Pearson (linear), Spearman (rank-monotonic), and Distance Correlation (non-linear). The resulting heatmaps (Figure \ref{fig:correlations}) provide strong empirical evidence for a dynamical bifurcation between the input-adjacent and terminal regions of the architecture.
+To evaluate the collective behaviour of the network, we analyse the cross-correlation of $L_2$ displacements across all layers using a trinity of metrics: Pearson (linear), Spearman (rank-monotonic), and Distance Correlation (non-linear). The resulting heatmaps (Figure \ref{fig:correlations}) provide strong empirical evidence for a dynamical bifurcation between the input-adjacent and terminal regions of the architecture.
 
 \begin{figure}[htbp]
     \centering
