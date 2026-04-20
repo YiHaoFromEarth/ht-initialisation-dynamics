@@ -6,6 +6,8 @@
 \usepackage{graphicx}
 \usepackage{booktabs}
 \usepackage{multirow}
+\usepackage{subcaption}
+\usepackage{microtype}
 \usepackage[left=2cm,right=2cm,top=2cm,bottom=2cm]{geometry}
 \author{Yi Hao}
 \title{Training Dynamics of Heavy-Tailed Initialisation in Deep Learning}
@@ -106,7 +108,7 @@ The core of this research involves a parametric sweep over non-Gaussian weight i
 
 \subsection{Optimization and Training Protocol}
 The networks are trained for 650 epochs using vanilla Stochastic Gradient Descent (SGD). We set a fixed learning rate of $\eta = 0.001$. Notably, we omit momentum and weight decay; this ensures that any observed structural evolution or rich learning behaviour is a direct result of the interaction between the heavy-tailed initialization and the fundamental SGD trajectory. All simulations are executed on NVIDIA hardware using the PyTorch framework with a fixed seed ($s=0$) to ensure exact reproducibility across parameter sweeps.
-\section{Results and Discussion}
+\section{Results}
 The performance of the 10-layer MLP was evaluated across a $3 \times 3$ grid of initialization parameters, varying the tail index $\alpha \in \{1.2,1.5,2.0\}$ and the scale factor $\sigma \in \{0.25,1.0,3.0\}$. These parameters were selected to represent the ordered, critical, and chaotic regimes, respectively.
 
 \begin{figure}[htbp]
@@ -147,25 +149,41 @@ Given the highly differentiated dynamics observed in the ordered regime, the rem
 \newpage
 \subsection{Spatial Decoupling in Layer-wise Dynamics}
 
-The evolution of the $L_2$ displacement over the training trajectory reveals a fundamental divergence in dynamical regimes across the network depth. By contrasting the first hidden layer ($W^1$) with the terminal hidden layer ($W^9$), we observe a clear decoupling in both the magnitude and nature of weight updates (Figures \ref{fig:layer_dynamics_early} and \ref{fig:layer_dynamics_deep}).
+\begin{figure}[htbp]
+    \centering
+    \begin{subfigure}{0.48\textwidth}
+    		\textbf{(a)}\\[1ex]
+        \includegraphics[width=\textwidth]{layer_dynamics_fast.pdf}
+        \caption{Micro-scale kinetics ($\tau=1$)}
+        \label{fig:dyn_micro}
+    \end{subfigure}
+    \hfill
+    \begin{subfigure}{0.48\textwidth}
+    		\textbf{(b)}\\[1ex]
+        \includegraphics[width=\textwidth]{layer_dynamics_slow.pdf}
+        \caption{Macro-scale kinetics ($\tau=58$)}
+        \label{fig:dyn_macro}
+    \end{subfigure}
+    \caption{Temporal evolution of $L_2$ weight displacement. (a) Step-wise dynamics ($\tau=1$) showing raw fluctuations and a 15-step rolling median. (b) Epoch-wise displacement ($\tau=58$) highlighting the contrast in trajectory smoothness between layers.}
+    \label{fig:dynamics}
+\end{figure}
+
+The layer-wise kinetics displayed in Figure \ref{fig:dynamics} reveal a distinct divergence in the dynamical evolution of the network. For the input layer ($W^1$), the $L_2$ displacement follows a tri-phasic trajectory: an initial rapid ascent from $10^{-6}$ to $10^{-5}$ within the first 2500 steps, followed by a secondary rise to the upper $10^{-5}$ range, and a final gradual descent. Notably, $W^1$ maintains a high, gradually increasing variance throughout the training process, characterized by persistent stochastic fluctuations at the micro-scale ($\tau=1$).
+
+In contrast, the classifier ($W_{10}$) exhibits a non-monotonic displacement pattern. Following an initial shared ascent with the input layer, $W_{10}$ enters a regime characterized by undulating pulses that persist until approximately step 17,000, after which the displacement follows a steady decay. At the $\tau=1$ scale (Fig. \ref{fig:dyn_micro}), $W_{10}$ is distinguished by a low baseline noise floor punctuated by intermittent, high-magnitude spikes. 
+
+A comparison between the micro-scale and macro-scale ($\tau=58$) kinetics in Figure \ref{fig:dyn_macro} reveals a shift in relative magnitudes. At the $\tau=1$ scale, the displacement of $W_{10}$ is consistently lower than or equal to $W^1$. However, at the $\tau=58$ scale, the magnitude of $W_{10}$ meets or exceeds that of $W^1$. Furthermore, the high-frequency variance observed in $W_{10}$ at the step-scale largely vanishes when viewed at the epoch-scale, resulting in a smooth trajectory. Conversely, the input layer maintains significant oscillatory behavior across both time lags.
 
 \begin{figure}[htbp]
     \centering
-    \includegraphics[width=0.8\textwidth]{layer_dynamics_early.pdf}
-    \caption{Evolution of the $L_2$ displacement for the shallow hidden layer $W^1$ ($\tau=1$). The trajectory stabilizes at a high-magnitude stochastic floor early in training.}
-    \label{fig:layer_dynamics_early}
+    \includegraphics[width=0.85\textwidth]{correlations.pdf}
+    \caption{Inter-layer correlation matrices of $L_2$ weight displacements ($\tau=1$). The emergence of block-diagonal structures suggests a partitioning of the network into two dynamically independent regions.}
+    \label{fig:correlations}
 \end{figure}
 
-For the early hidden layers ($W^1$ through $W^7$), the dynamics follow a consistent, near-stationary profile. The displacement originates at approximately $2 \times 10^{-7}$ and undergoes a rapid ascent within the first 5,000 training steps, stabilizing at a high-energy plateau of $10^{-5}$. This level of activity is maintained throughout the majority of the training run, accompanied by a steady increase in the variance of the displacement. 
+The global organization of these dynamics is further quantified via the correlation matrices in Figure \ref{fig:correlations}. Across Pearson, Spearman, and Distance Correlation metrics, a consistent block-diagonal structure emerges, indicating that the observed dynamics are representative of collective layer behaviors. The network appears to partition into two independent blocks: a primary block spanning layers $W^1$ through $W^7$, and a secondary block comprising $W^8$ through $W_{10}$. 
 
-\begin{figure}[htbp]
-    \centering
-    \includegraphics[width=0.8\textwidth]{layer_dynamics_deep.pdf}
-    \caption{Evolution of the $L_2$ displacement for the terminal hidden layer $W^9$ ($\tau=1$). Note the characteristic wave-like oscillations and the asymmetric upward spiking behaviour.}
-    \label{fig:layer_dynamics_deep}
-\end{figure}
-
-In contrast, the terminal layers ($W^8$, $W^9$, and the Classifier) exhibit highly non-stationary behaviour. Initial displacement values rise to $6 \times 10^{-7}$, but unlike the shallow layers, the variance remains low, and the mean displacement follows a characteristic wave-like oscillation. Following step 17,000, coinciding with the terminal plateau of the test accuracy curve, the displacement begins a gradual descent toward a lower magnitude of $3 \times 10^{-8}$. During this phase, we observe a significant increase in variance characterized by asymmetric upward spikes, where the displacement magnitude periodically jumps while the minimum baseline remains relatively capped.
+Within these identified blocks, we observe moderately high correlations (ranging from $0.6$ to $0.7$ for Pearson), while inter-block correlations drop significantly ($< 0.2$ or negative). We further note that while the Pearson matrix indicates relatively uniform coupling within each block, the Spearman and Distance Correlation matrices display a more heterogeneous "checkerboard" pattern, with localized correlations fluctuating between $0.5$ and $0.9$. This suggests that while linear trends are shared across layers within a block, the underlying non-linear dependencies exhibit a higher degree of local variation.
 
 \subsection{Discussion: Diffusion vs. Directed Adaptation}
 
@@ -198,22 +216,6 @@ This observation supports the hypothesis of a hierarchical decoupling. The termi
     \caption{Layer-wise correlation matrices of $L_2$ displacements ($\tau=1$). The emergence of distinct block-diagonal structures indicates a functional decoupling between the diffusive shallow layers and the ballistic terminal engine.}
     \label{fig:correlations}
 \end{figure}
-
-\subsection{Statistical Signatures of Hierarchical Decoupling}
-
-To evaluate the collective behaviour of the network, we analyse the cross-correlation of $L_2$ displacements across all layers using a trinity of metrics: Pearson (linear), Spearman (rank-monotonic), and Distance Correlation (non-linear). The resulting heatmaps (Figure \ref{fig:correlations}) provide strong empirical evidence for a dynamical bifurcation between the input-adjacent and terminal regions of the architecture.
-
-\begin{figure}[htbp]
-    \centering
-    \includegraphics[width=\textwidth]{correlations.pdf}
-    \caption{Layer-wise correlation matrices of $L_2$ displacements ($\tau=1$). The emergence of distinct block-diagonal structures indicates a functional decoupling between the diffusive shallow layers and the ballistic terminal engine.}
-    \label{fig:correlations}
-\end{figure}
-
-The matrices reveal a clear division of the MLP into two distinct functional modules. The terminal block, comprising layers $W^8$ through $W^{10}$ (the Classifier), exhibits a high degree of internal synchrony, with correlations frequently exceeding 0.70. This tight coupling suggest that these layers operate as a singular, unified functional unit, likely driving the coordinated structural realignments observed in the accuracy staircase.
-
-A secondary, larger block is visible among the shallower layers ($W^1$ to $W^7$). While this region maintains high internal correlation, it is characterized by a checkerboard pattern of varying intensities. This suggests a more complex internal hierarchy where layers are coupled to maintain signal propagation but retain a degree of dynamical independence.
-
-Most importantly, the matrices confirm the spatial decoupling of the network. The Pearson correlation between the shallow and deep blocks drop precipitously toward zero, indicating an absence of simple linear dependencies. However, the Distance Correlation (dcor) reveals a persistent, albeit weak, coupling of approximately 0.2 to 0.4. This suggests that while the ballistic engine of the terminal layers is functionally decoupled from the diffusive reservoir of the shallow layers, a complex, non-linear informational link remains, potentially allowing the terminal layers to rectify the stochastic noise generated by the shallow architecture.
-
+\section{Discussion}
+\section{Conclusion}
 \end{document}

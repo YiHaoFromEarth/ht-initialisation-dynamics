@@ -7,13 +7,12 @@ import json
 import re
 import gc
 import dcor
-import os
 from pathlib import Path
-from collections import defaultdict, deque
+from collections import deque
 from scipy.optimize import curve_fit
-from scipy.stats import pearsonr, spearmanr
+from scipy.stats import spearmanr
 from .equations import (
-    hill_estimator,
+    mcculloch_estimator,
     relative_frobenius_norm,
     spectral_norm,
     spectral_gap,
@@ -31,9 +30,9 @@ from .utils import (
 )
 
 
-class LayerWiseTAMSDTracker:
+class ModelTracker:
     """
-    Optimized TAMSD tracker for high-end GPUs.
+    Optimized tracker for high-end GPUs.
     Tracks multiple lag times (tau) across all layers simultaneously.
     """
 
@@ -126,7 +125,7 @@ def get_layer_fingerprint(W):
     # --- EXTENSIBLE METRIC SECTION ---
     # You can add new metrics here easily.
     fingerprint = {
-        "alpha": hill_estimator(W_torch, k_percent=0.01),
+        "alpha": mcculloch_estimator(W_torch),
         "spectral_norm": spectral_norm(W_torch),
         "spectral_gap": spectral_gap(W_torch),
         "stable_rank": stable_rank(W_torch),
@@ -252,103 +251,6 @@ def collect_sweep_metrics(sweep_dir, output_name="sweep_metrics.csv"):
     df = pd.DataFrame(records)
     df.to_csv(output_name, index=False)
     print(f"Done! Results saved to {output_name}")
-    return df
-
-
-def collect_tamsd_snapshots(sweep_dir, output_name="tamsd_metrics.csv"):
-    sweep_path = Path(sweep_dir)
-    all_results = []
-
-    config_files = list(sweep_path.rglob("run_config.json"))
-
-    for cfg_path in config_files:
-        run_dir = cfg_path.parent
-        ckpt_dir = run_dir / "checkpoints"
-
-        with open(cfg_path, "r") as f:
-            cfg = json.load(f)
-
-        metadata = {
-            "run_id": run_dir.name,
-            "alpha": cfg["ht_config"].get("alpha"),
-            "sigma": cfg["ht_config"].get("g"),
-        }
-
-        # 1. Identify and Sort all checkpoints
-        ckpts = list(ckpt_dir.glob("weights_epoch_*.pth"))
-        ckpts.sort(key=lambda x: int(re.search(r"epoch_(\d+)", x.name).group(1)))
-
-        final_pth = ckpt_dir / "final_model.pth"
-        if final_pth.exists():
-            ckpts.append(final_pth)
-
-        # 2. LOAD EVERYTHING into a dictionary of lists: {layer_name: [tensor_e0, tensor_e1, ...]}
-        # We also need the epoch values to calculate the Lags (Delta)
-        layer_histories = defaultdict(list)
-        epoch_values = []
-
-        for ckpt_path in ckpts:
-            # Determine epoch
-            if "final_model" in ckpt_path.name:
-                epoch_val = cfg["hyperparams"].get("epochs")
-            else:
-                epoch_val = int(re.search(r"epoch_(\d+)", ckpt_path.name).group(1))
-            epoch_values.append(epoch_val)
-
-            checkpoint = torch.load(ckpt_path, map_location="cpu", weights_only=True)
-            state_dict = checkpoint.get(
-                "model_state", checkpoint.get("state_dict", checkpoint)
-            )
-
-            for key, tensor in state_dict.items():
-                if "weight" in key:
-                    # THE PARITY FIX:
-                    # Force everything through the bfloat16 bottleneck to match
-                    # the low-precision snapshots, then calculate in float32.
-                    equalized_tensor = (
-                        tensor.to(torch.bfloat16)  # Drop the extra bits
-                        .to(torch.float32)  # Convert back for math stability
-                        .view(-1)  # Flatten
-                    )
-                    layer_histories[key].append(equalized_tensor)
-            del checkpoint
-
-        # 3. COMPUTE TAMSD PER LAYER
-        for layer_name, tensors in layer_histories.items():
-            # Stack into (45, num_params)
-            stacked = torch.stack(tensors)
-
-            # Vectorized Pairwise Distance: ||a-b||^2 = ||a||^2 + ||b||^2 - 2<a,b>
-            dist_matrix = torch.cdist(stacked, stacked, p=2) ** 2
-
-            # 4. BINNING LOGIC
-            bin_accumulator = defaultdict(list)
-            num_snapshots = len(epoch_values)
-
-            for i in range(num_snapshots):
-                for j in range(i + 1, num_snapshots):
-                    delta_t = epoch_values[j] - epoch_values[i]
-                    d_squared = dist_matrix[i, j].item()
-                    bin_accumulator[delta_t].append(d_squared)
-
-            # Average the bins and record
-            for delta_t, values in bin_accumulator.items():
-                all_results.append(
-                    {
-                        **metadata,
-                        "layer": layer_name,
-                        "delta_t": delta_t,
-                        "msd": np.mean(values),
-                        "std_msd": np.std(values),
-                        "pair_count": len(values),
-                    }
-                )
-
-        print(f"Processed run: {run_dir.name}")
-
-    # Save to CSV
-    df = pd.DataFrame(all_results)
-    df.to_csv(output_name, index=False)
     return df
 
 

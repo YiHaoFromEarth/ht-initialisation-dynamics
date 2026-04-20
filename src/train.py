@@ -9,7 +9,7 @@ from datetime import datetime
 from torchinfo import summary
 from pathlib import Path
 from tqdm import tqdm
-from .analysis import LayerWiseTAMSDTracker
+from .analysis import ModelTracker
 from .utils import (
     model_factory,
     set_seed,
@@ -135,8 +135,8 @@ def train_model(
         criterion = nn.CrossEntropyLoss()
         history = []
 
-        step_tamsd_tracker = LayerWiseTAMSDTracker(model, lags=[1, 2, 4, 8, 16, 32])
-        epoch_tamsd_tracker = LayerWiseTAMSDTracker(model, lags=[1, 2, 4, 8, 16, 32, 64, 128])
+        step_tamsd_tracker = ModelTracker(model, lags=[1, 2, 4, 8, 16, 32])
+        epoch_tamsd_tracker = ModelTracker(model, lags=[1, 2, 4, 8, 16, 32, 64, 128])
 
         # --- Epoch 0: Initial Evaluation ---
         train_m = evaluate_model(model, loaders["train"], device, criterion)

@@ -8,6 +8,7 @@ from torch.utils.data import DataLoader, TensorDataset
 from pathlib import Path
 from src.utils import get_layer_from_checkpoint
 from src.analysis import (
+    ModelTracker,
     get_singular_values,
     get_layer_fingerprint,
     evaluate_spectral_perturbation,
@@ -45,52 +46,6 @@ def test_singular_values_identity():
 
     # 2. Dimensions must match the smaller axis (m)
     assert len(nu) == size, f"Expected {size} singular values"
-
-
-def test_fingerprint_logic():
-    # --- 1. Define Toy Matrices ---
-    # W_0: Simple Identity (Uniform)
-    W_0 = torch.tensor([[1.0, 0.0], [0.0, 1.0]])
-
-    # W_t: Scaled and "Spiky" (Concentrated)
-    # We move the first element and keep the second at 1.0
-    W_t = torch.tensor([[2.0, 0.0], [0.0, 1.0]])
-
-    # --- 2. Manual Ground Truth Calculations ---
-    # S_t will be [2.0, 1.0] | V_t[:, 0] will be [1.0, 0.0]
-
-    # Displacement: sqrt((2-1)^2 + 0 + 0 + (1-1)^2) / sqrt(1^2 + 1^2) = 1 / sqrt(2)
-    expected_displacement = 1.0 / np.sqrt(2.0)
-
-    # Effective Rank: (2^2 + 1^2) / (2^2) = 5 / 4 = 1.25
-    expected_eff_rank = 1.25
-
-    # IPR of [1, 0]: (1^4 + 0^4) / (1^2 + 0^2)^2 = 1 / 1 = 1.0 (Perfectly Spiky)
-    expected_ipr = 1.0
-
-    # Participation Ratio: (2 + 1)^2 / (2 * (2^2 + 1^2)) = 9 / (2 * 5) = 0.9
-    expected_part_ratio = 0.9
-
-    # Max Singular Val: 2.0
-    expected_max_s = 2.0
-
-    # --- 3. Execute Function ---
-    results = get_layer_fingerprint(W_0, W_t)
-
-    # --- 4. Assertions ---
-    tol = 1e-6
-    try:
-        assert abs(results["displacement"] - expected_displacement) < tol
-        assert abs(results["effective_rank"] - expected_eff_rank) < tol
-        assert abs(results["ipr"] - expected_ipr) < tol
-        assert abs(results["participation_ratio"] - expected_part_ratio) < tol
-        assert abs(results["max_singular_val"] - expected_max_s) < tol
-        print("ALL TESTS PASSED: Metric logic is mathematically sound.")
-    except AssertionError as e:
-        print("TEST FAILED: Discrepancy found in metric calculations.")
-        for k, v in results.items():
-            print(f"  {k}: {v}")
-        raise e
 
 
 def test_rigorous_perturbation():
@@ -265,3 +220,96 @@ def test_hill_normal_distribution():
     # Alpha for a Normal distribution usually estimates > 2 or 3
     # as k -> 0, signifying it is not heavy-tailed.
     assert estimated_alpha > 2.0
+
+
+def test_model_tracker_math_accuracy():
+    """
+    Unit test to verify that ModelTracker correctly calculates:
+    1. Net Drift (Mean of diff)
+    2. L1 Distance (Mean of abs diff)
+    3. L2 Distance (RMS of diff)
+    """
+
+    # 1. Setup a simple dummy model
+    class DummyModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            # Two parameters of size 4 to make mental math easy
+            self.param1 = nn.Parameter(torch.zeros(4))
+            self.param2 = nn.Parameter(torch.ones(4))
+
+    model = DummyModel()
+    lags = [1, 2]
+    tracker = ModelTracker(model, lags=lags)
+
+    # 2. Define controlled updates (History Step 0: [0,0,0,0])
+    tracker.update(model)
+
+    # 3. Update 1: Move param1 by a specific vector [1, -1, 2, -2]
+    # Sum = 0 (Net Drift should be 0)
+    # Abs Sum = 6 (L1 should be 6/4 = 1.5)
+    # Sq Sum = 1+1+4+4 = 10 (L2 should be sqrt(10/4) = sqrt(2.5) approx 1.581)
+    with torch.no_grad():
+        model.param1.add_(torch.tensor([1.0, -1.0, 2.0, -2.0]))
+
+    tracker.update(model)  # This triggers tau=1 calculation
+
+    # 4. Verify Tau=1 Results for param1
+    param1_data = tracker.raw_data["param1"][1][0]
+    net, l1, l2 = param1_data
+
+    assert pytest.approx(net, abs=1e-6) == 0.0, (
+        "Net Drift should be 0 for symmetric movement"
+    )
+    assert pytest.approx(l1, abs=1e-6) == 1.5, "L1 Distance calculation failed"
+    assert pytest.approx(l2, abs=1e-6) == np.sqrt(2.5), (
+        "L2/RMS Energy calculation failed"
+    )
+
+    # 5. Update 2: Move param1 again by [2, 2, 2, 2]
+    # Current state is [3, 1, 4, 0]
+    # Past state (tau=2) was [0, 0, 0, 0]
+    # Diff for tau=2 is [3, 1, 4, 0]
+    # Net: (3+1+4+0)/4 = 2.0
+    # L1: (3+1+4+0)/4 = 2.0
+    # L2: sqrt((9+1+16+0)/4) = sqrt(6.5) approx 2.549
+    with torch.no_grad():
+        model.param1.add_(torch.tensor([2.0, 2.0, 2.0, 2.0]))
+
+    tracker.update(model)  # This triggers tau=1 and tau=2 calculation
+
+    # Verify Tau=2 Results
+    net_t2, l1_t2, l2_t2 = tracker.raw_data["param1"][2][0]
+    assert pytest.approx(net_t2, abs=1e-6) == 2.0
+    assert pytest.approx(l1_t2, abs=1e-6) == 2.0
+    assert pytest.approx(l2_t2, abs=1e-6) == np.sqrt(6.5)
+
+
+def test_dataframe_conversion_logic():
+    """Verifies that the scale and step centering logic is consistent."""
+
+    class SimpleModel(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.p = nn.Parameter(torch.zeros(1))
+
+    model = SimpleModel()
+    tracker = ModelTracker(model, lags=[1])
+
+    # Add two updates
+    tracker.update(model)
+    model.p.data += 1.0
+    tracker.update(model)
+
+    # scale=100 (e.g., 100 steps per epoch)
+    df = tracker.to_dataframe(alpha=1.2, sigma=0.25, scale=100)
+
+    # Check if the step centering works: (0 + 1 - 0.5) * 100 = 50
+    assert df["step"].iloc[0] == 50
+    assert df["time_lag"].iloc[0] == 100
+    assert df["alpha"].iloc[0] == 1.2
+
+
+if __name__ == "__main__":
+    # If running manually without pytest command
+    pytest.main([__file__])
