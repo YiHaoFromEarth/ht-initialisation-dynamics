@@ -157,7 +157,6 @@ Given the highly differentiated dynamics observed in the ordered regime, the rem
         \caption{Micro-scale kinetics ($\tau=1$)}
         \label{fig:dyn_micro}
     \end{subfigure}
-    \hfill
     \begin{subfigure}{0.48\textwidth}
     		\textbf{(b)}\\[1ex]
         \includegraphics[width=\textwidth]{layer_dynamics_slow.pdf}
@@ -185,23 +184,26 @@ The global organization of these dynamics is further quantified via the correlat
 
 Within these identified blocks, we observe moderately high correlations (ranging from $0.6$ to $0.7$ for Pearson), while inter-block correlations drop significantly ($< 0.2$ or negative). We further note that while the Pearson matrix indicates relatively uniform coupling within each block, the Spearman and Distance Correlation matrices display a more heterogeneous "checkerboard" pattern, with localized correlations fluctuating between $0.5$ and $0.9$. This suggests that while linear trends are shared across layers within a block, the underlying non-linear dependencies exhibit a higher degree of local variation.
 
-\subsection{Discussion: Diffusion vs. Directed Adaptation}
-
-The qualitative differences in the noise profiles between layers suggest a hierarchical division of labour within the architecture. In shallow layers, the displacement varies symmetrically, which is indicative of a diffusive, short-term stochastic state. These layers appear to function as a high-energy reservoir, facilitating exploratory movement within the parameter space.
-
-The terminal layers, however, exhibit signatures of a more directed state. The observed upward spikes in the $L_2$ displacement are characteristic of Lévy flight phenomena, where the layer undergoes sparse, high-magnitude translations. The frequency and magnitude of these flights increase during the late-stage accuracy descent, suggesting they are the primary drivers of decision boundary refinement. 
-
-There appears to be a direct correlation between the stability of the test accuracy and these terminal layer fluctuations. We hypothesize that while the early layers provide a diffusive foundation for signal propagation, the terminal layers leverage the extended critical regime to perform the directed structural realignments required to cross performance plateaus and achieve final convergence.
-
 \subsection{Diffusion Regime Identification via TAMSD}
 
 To rigorously categorize the transport physics of the network, we analyse the Time-Averaged Mean Squared Displacement (TAMSD) on a log-log scale (Figure \ref{fig:tamsd_comparison}). The scaling exponent $\gamma$, defined by $\langle \Delta x^2 \rangle \sim \tau^\gamma$, provides a quantitative measure of the diffusion regime, where $\gamma = 1$ denotes Brownian motion, $\gamma < 1$ signifies sub-diffusion, and $\gamma \approx 2$ indicates ballistic or directed motion.
 
 \begin{figure}[htbp]
     \centering
-    \includegraphics[width=0.8\textwidth]{tamsd_comparison.pdf}
-    \caption{Log-log TAMSD profiles for the input-adjacent layer $W^1$ and terminal layer $W^9$. The distinct slopes reveal a fundamental divergence in diffusion dynamics across the architecture.}
-    \label{fig:tamsd_comparison}
+    \begin{subfigure}{0.48\textwidth}
+    		\textbf{(a)}\\[1ex]
+        \includegraphics[width=\textwidth]{tamsd_comparison.pdf}
+        \caption{Micro-scale kinetics ($\tau=1$)}
+        \label{fig:tamsd_compare}
+    \end{subfigure}
+    \begin{subfigure}{0.48\textwidth}
+    		\textbf{(b)}\\[1ex]
+        \includegraphics[width=\textwidth]{tamsd_evolution.pdf}
+        \caption{Macro-scale kinetics ($\tau=58$)}
+        \label{fig:tamsd_evo}
+    \end{subfigure}
+    \caption{Temporal evolution of $L_2$ weight displacement. (a) Step-wise dynamics ($\tau=1$) showing raw fluctuations and a 15-step rolling median. (b) Epoch-wise displacement ($\tau=58$) highlighting the contrast in trajectory smoothness between layers.}
+    \label{fig:tamsd}
 \end{figure}
 
 The terminal hidden layer $W^9$ exhibits a remarkably consistent super-diffusive, near-ballistic regime across the entire range of observed time lags. The profile appears as a linear power law with an estimated exponent of $\gamma \approx 1.99$ for $\tau < 8$ epochs, slightly moderating to $\gamma \approx 1.76$ for macroscopic lags ($\tau > 8$ epochs). This persistent linearity suggests that the terminal layers are in a continuously driven state, undergoing directed translations within the parameter manifold.
