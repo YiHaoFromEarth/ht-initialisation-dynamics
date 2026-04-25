@@ -86,32 +86,49 @@ def mcculloch_estimator(W):
     q = torch.quantile(W, torch.tensor([0.05, 0.25, 0.75, 0.95], device=device))
 
     v0_5 = q[3] - q[0]  # 95th - 5th (Full width)
-    v0_25 = q[2] - q[1] # 75th - 25th (Interquartile range)
+    v0_25 = q[2] - q[1]  # 75th - 25th (Interquartile range)
 
-    if v0_5 == 0: return 2.0
+    if v0_5 == 0:
+        return 2.0
 
     # 2. Dispersion Ratio
     nu = v0_25 / v0_5
 
-    # 3. CORRECTED Reference Table for Symmetric Stable Distributions
+    # 3. Reference Table for Symmetric Stable Distributions
     # These values map (nu) -> alpha for the ratio (q75-q25)/(q95-q05)
-    nu_ref = torch.tensor([
-        0.042, 0.067, 0.095, 0.126, 0.158, 0.191, 0.225,
-        0.257, 0.289, 0.317, 0.343, 0.365, 0.383, 0.398, 0.410
-    ], device=device)
+    nu_ref = torch.tensor(
+        [
+            0.042,
+            0.067,
+            0.095,
+            0.126,
+            0.158,
+            0.191,
+            0.225,
+            0.257,
+            0.289,
+            0.317,
+            0.343,
+            0.365,
+            0.383,
+            0.398,
+            0.410,
+        ],
+        device=device,
+    )
 
-    alpha_ref = torch.tensor([
-        0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2,
-        1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 2.0
-    ], device=device)
+    alpha_ref = torch.tensor(
+        [0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 2.0],
+        device=device,
+    )
 
     # 4. Interpolation logic
     nu = torch.clamp(nu, min=nu_ref[0], max=nu_ref[-1])
     idx = torch.searchsorted(nu_ref, nu)
     idx = torch.clamp(idx, 1, len(nu_ref) - 1)
 
-    x0, x1 = nu_ref[idx-1], nu_ref[idx]
-    y0, y1 = alpha_ref[idx-1], alpha_ref[idx]
+    x0, x1 = nu_ref[idx - 1], nu_ref[idx]
+    y0, y1 = alpha_ref[idx - 1], alpha_ref[idx]
 
     alpha = y0 + (nu - x0) * (y1 - y0) / (x1 - x0)
 

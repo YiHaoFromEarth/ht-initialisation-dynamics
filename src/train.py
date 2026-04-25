@@ -261,17 +261,19 @@ def train_model(
             json.dump(config_dump, f, indent=4)
 
         # Extract metadata for the DataFrame
-        a_val = ht_config.get('alpha', 'N/A')
-        s_val = ht_config.get('g', 'N/A')
+        a_val = ht_config.get("alpha", "N/A")
+        s_val = ht_config.get("g", "N/A")
 
         # 1. Get DataFrames from both trackers
         df_step = step_tamsd_tracker.to_dataframe(a_val, s_val, scale=1)
-        df_epoch = epoch_tamsd_tracker.to_dataframe(a_val, s_val, scale=60000//1024)
+        df_epoch = epoch_tamsd_tracker.to_dataframe(a_val, s_val, scale=60000 // 1024)
 
         # 2. Combine and Sort
         # This creates one master 'Physics' file for the entire run
         master_physics_df = pd.concat([df_step, df_epoch], ignore_index=True)
-        master_physics_df = master_physics_df.sort_values(by=["layer", "time_lag", "step"])
+        master_physics_df = master_physics_df.sort_values(
+            by=["layer", "time_lag", "step"]
+        )
 
         # 3. Save as a single Parquet (much better than JSON for this volume!)
         master_physics_df.to_parquet(run_dir / "displacement_log.parquet")

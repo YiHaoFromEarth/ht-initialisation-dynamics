@@ -10,11 +10,10 @@ from src.utils import get_layer_from_checkpoint
 from src.analysis import (
     ModelTracker,
     get_singular_values,
-    get_layer_fingerprint,
     evaluate_spectral_perturbation,
     run_spectral_analysis,
-    hill_estimator,
 )
+from src.equations import hill_estimator
 
 
 # --- 1. A Minimal Model for Testing ---
