@@ -333,68 +333,107 @@ def get_layer_from_checkpoint(model_path, layer_key):
     return state_dict[layer_key].detach().float().cpu()
 
 
+def get_all_layers_from_checkpoint(model_path):
+    """
+    Retrieves all parameter matrices (weights/biases) from a saved checkpoint
+    and returns them in a dictionary for easy parsing and analysis.
+
+    Args:
+        model_path (str or Path): Path to the .pth file.
+
+    Returns:
+        dict: A dictionary mapping layer names (str) to torch.Tensors (float32 on CPU).
+    """
+    # 1. Load to CPU using the same safety protocols as your existing utils
+    # weights_only=True is preferred for security and speed during analysis
+    checkpoint = torch.load(model_path, map_location="cpu", weights_only=True)
+
+    # 2. Extract the actual state_dict using your project's nesting logic
+    state_dict = checkpoint.get("model_state", checkpoint)
+    if not isinstance(state_dict, dict):
+        state_dict = checkpoint.get("state_dict", checkpoint)
+
+    # 3. Filter for parameters and standardize the format
+    layers_dict = {}
+    for key, tensor in state_dict.items():
+        # Capturing weights and biases as they define the 'layers' in analysis
+        if isinstance(tensor, torch.Tensor):
+            # detach: isolates from any computational graph
+            # float(): ensures bfloat16/half weights are cast to standard float32
+            # cpu(): guarantees they are ready for numpy/plotting tools
+            layers_dict[key] = tensor.detach().float().cpu()
+
+    return layers_dict
+
+
+def get_checkpoint_map(run_path):
+    """
+    Scans the checkpoints directory and returns a sorted mapping of
+    epoch/step numbers to their corresponding file paths.
+
+    Returns:
+        dict: {int_step: Path_to_file} sorted by step ascending.
+    """
+    checkpoint_dir = Path(run_path) / "checkpoints"
+    ckpt_map = {}
+
+    if not checkpoint_dir.exists():
+        return {}
+
+    # 1. Capture intermediate epoch weights
+    # Matches 'weights_epoch_10.pth' -> extract 10
+    for ckpt in checkpoint_dir.glob("weights_epoch_*.pth"):
+        match = re.search(r"epoch_(\d+)", ckpt.name)
+        if match:
+            ckpt_map[int(match.group(1))] = ckpt
+
+    # 2. Capture the final model if it exists
+    # We pull the epoch count from run_config to give it the correct 'step' key
+    config_path = Path(run_path) / "run_config.json"
+    if (checkpoint_dir / "final_model.pth").exists() and config_path.exists():
+        with open(config_path, "r") as f:
+            cfg = json.load(f)
+            final_epoch = cfg["hyperparams"].get("epochs")
+            ckpt_map[final_epoch] = checkpoint_dir / "final_model.pth"
+
+    # 3. Return as a dict sorted by the keys (epochs/steps)
+    return dict(sorted(ckpt_map.items()))
+
+
 def collect_run_snapshots(run_path):
     """
-    Scans a run folder, extracts weight matrices, casts bfloat16 to float32,
-    and returns a DataFrame of the weights history.
+    Scans a run folder, extracts weight matrices using modular helpers,
+    and returns a DataFrame of the weights history for physics analysis.
     """
     run_path = Path(run_path)
-    checkpoint_dir = run_path / "checkpoints"
-    config_path = run_path / "run_config.json"
 
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config not found at {config_path}")
-
-    # 1. Load config for metadata
-    with open(config_path, "r") as f:
-        config = json.load(f)
-
-    final_epoch_val = config["hyperparams"]["epochs"]
+    # 1. Retrieve the validated timeline of checkpoints
+    # This replaces the manual globbing and regex matching
+    ckpt_map = get_checkpoint_map(run_path)
 
     snapshot_data = []
 
-    # 2. Identify all checkpoint files
-    # This pattern matches 'weight_epoch_X.pth'
-    ckpt_files = list(checkpoint_dir.glob("weights_epoch_*.pth"))
+    # 2. Iterate through the mapping (sorted by epoch/step)
+    for epoch, file_path in ckpt_map.items():
+        # 3. Extract all layers using the standardized float32/CPU helper
+        layers = get_all_layers_from_checkpoint(file_path)
 
-    def process_file(file_path, epoch_val):
-        # Load the checkpoint
-        checkpoint = torch.load(file_path, map_location="cpu", weights_only=True)
-        state_dict = checkpoint.get("model_state", checkpoint)
-
-        if (
-            not any("weight" in k for k in state_dict.keys())
-            and "state_dict" in checkpoint
-        ):
-            state_dict = checkpoint["state_dict"]
-
-        for key, tensor in state_dict.items():
+        for key, tensor in layers.items():
+            # Physics analysis typically targets weight matrices
             if "weight" in key:
-                # Cast and flatten
-                flat_weights = tensor.to(torch.float32).detach().numpy().flatten()
+                # Convert the standardized tensor to a flattened numpy array
+                snapshot_data.append({
+                    "epoch": epoch,
+                    "layer": key,
+                    "weights": tensor.numpy().flatten()
+                })
 
-                snapshot_data.append(
-                    {"epoch": epoch_val, "layer": key, "weights": flat_weights}
-                )
-
-    # 3. Process intermediate snapshots
-    for ckpt in ckpt_files:
-        try:
-            epoch_num = int(re.search(r"epoch_(\d+)", ckpt.name).group(1))
-            process_file(ckpt, epoch_num)
-        except AttributeError:
-            continue  # Skip files that don't match the naming convention
-
-    # 4. Process final model
-    final_pth = checkpoint_dir / "final_model.pth"
-    if final_pth.exists():
-        process_file(final_pth, final_epoch_val)
-
-    # 5. Build and clean DataFrame
+    # 4. Consolidate into a structured DataFrame
     df = pd.DataFrame(snapshot_data)
 
-    # Ensure numerical sorting (crucial for Ridge Plots)
-    df = df.sort_values(by=["layer", "epoch"]).reset_index(drop=True)
+    # 5. Final Sort: Essential for sequential visualizations (e.g., Ridge Plots)
+    if not df.empty:
+        df = df.sort_values(by=["layer", "epoch"]).reset_index(drop=True)
 
     return df
 

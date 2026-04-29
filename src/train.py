@@ -293,7 +293,7 @@ def train_model(
         print("--- Run Complete. Console logging detached ---")
 
 
-def run_experiment(config_path="config.yaml", num_seeds=1):
+def run_experiment(config_path="config.yaml", num_seeds=1, start_seed=None):
     """
     Executes an experiment sweep by reading a config file.
 
@@ -308,8 +308,9 @@ def run_experiment(config_path="config.yaml", num_seeds=1):
     base_output = cfg["full_config"]["experiment_metadata"]["output_root"]
 
     # 4. Multi-Seed Sweep Execution
-    starting_seed = cfg["full_config"]["hyperparams"].get("seed", 0)
-    seeds = range(starting_seed, starting_seed + num_seeds)
+    if start_seed is None:
+        start_seed = cfg["full_config"]["hyperparams"].get("seed", 0)
+    seeds = range(start_seed, start_seed + num_seeds)
     ht_config = cfg["full_config"].get("heavy_tail", {})
 
     print(f"Starting experiment with {num_seeds} seeds, outputting to: {base_output}")
@@ -333,7 +334,7 @@ def run_experiment(config_path="config.yaml", num_seeds=1):
         )
 
 
-def run_parameter_sweep(config_path="sweep_config.yaml", num_seeds=1):
+def run_parameter_sweep(config_path="sweep_config.yaml", num_seeds=1, start_seed=None):
     """
     Iterates through a grid of alpha and g values across multiple seeds.
     Saves results into structured subfolders: output_root/alpha_g/seed_k/
@@ -355,8 +356,9 @@ def run_parameter_sweep(config_path="sweep_config.yaml", num_seeds=1):
     if not isinstance(g_list, list):
         g_list = [g_list]
 
-    starting_seed = cfg["full_config"]["hyperparams"].get("seed", 0)
-    seeds = range(starting_seed, starting_seed + num_seeds)
+    if start_seed is None:
+        start_seed = cfg["full_config"]["hyperparams"].get("seed", 0)
+    seeds = range(start_seed, start_seed + num_seeds)
 
     # 3. Execution: Seed -> (Alpha, G) Grid
     sweep_grid = list(itertools.product(alpha_list, g_list))
@@ -396,12 +398,16 @@ def run_parameter_sweep(config_path="sweep_config.yaml", num_seeds=1):
 
 
 if __name__ == "__main__":
-    # 1. Load Master Configuration
-    # Check if a config file was passed via CLI
-    if len(sys.argv) > 1:
-        config_path = sys.argv[1]
-    else:
-        config_path = "config.yaml"
+    # Argument 1: Config Path
+    config_path = sys.argv[1] if len(sys.argv) > 1 else "config.yaml"
+
+    # Argument 2: Starting Seed (The "offset" for PBS Arrays)
+    # Default to the seed in the YAML if not provided
+    start_seed = int(sys.argv[2]) if len(sys.argv) > 2 else None
+
+    # Argument 3: Number of seeds to run in this specific job
+    # Default to 1 (perfect for PBS Arrays)
+    num_to_run = int(sys.argv[3]) if len(sys.argv) > 3 else 1
 
     with open(config_path, "r") as f:
         cfg = yaml.safe_load(f)
@@ -412,9 +418,13 @@ if __name__ == "__main__":
 
     if isinstance(alpha, list) or isinstance(g, list):
         run_parameter_sweep(
-            config_path, num_seeds=int(sys.argv[2]) if len(sys.argv) > 2 else 1
+            config_path,
+            num_seeds=num_to_run,
+            start_seed=start_seed
         )
     else:
         run_experiment(
-            config_path, num_seeds=int(sys.argv[2]) if len(sys.argv) > 2 else 1
+            config_path,
+            num_seeds=num_to_run,
+            start_seed=start_seed
         )

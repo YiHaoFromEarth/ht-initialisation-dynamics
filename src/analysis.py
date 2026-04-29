@@ -9,6 +9,8 @@ import gc
 import dcor
 from pathlib import Path
 from collections import deque
+from concurrent.futures import ProcessPoolExecutor
+from tqdm import tqdm
 from scipy.stats import spearmanr
 from .rmt import fit_marcenkoPastur
 from .equations import (
@@ -156,101 +158,118 @@ def get_difference_fingerprint(W, W0):
     return fingerprint
 
 
-def collect_sweep_metrics(sweep_dir, output_name="sweep_metrics.csv"):
-    """
-    Iterates through a sweep, calculates metrics file-by-file,
-    and saves to a CSV.
-    """
-    sweep_path = Path(sweep_dir)
+def process_single_run(cfg_path):
+    """Worker function to process one run folder."""
+    run_dir = cfg_path.parent
+    ckpt_dir = run_dir / "checkpoints"
     records = []
 
-    # 1. Walk through the alpha/sigma folders
-    # We use rglob to find all run_config files to identify run directories
+    # --- Seed Extraction ---
+    # Look for the '_s' suffix in the folder name (e.g., ..._20260427_185703_s0)
+    seed_match = re.search(r"_s(\d+)$", run_dir.name)
+    seed_val = int(seed_match.group(1)) if seed_match else 0
+
+    # Load Metadata
+    with open(cfg_path, "r") as f:
+        cfg = json.load(f)
+
+    metadata = {
+        "alpha": cfg["ht_config"].get("alpha"),
+        "sigma": cfg["ht_config"].get("g"),
+        "seed": seed_val,
+        "run_name": run_dir.name # Helpful for debugging later
+    }
+    final_epoch = cfg["hyperparams"].get("epochs")
+
+    # 2. Identify and Sort Checkpoints
+    all_ckpts = list(ckpt_dir.glob("weights_epoch_*.pth"))
+    # Sort numerically so Epoch 0 is always index [0]
+    all_ckpts.sort(key=lambda x: int(re.search(r"epoch_(\d+)", x.name).group(1)))
+
+    # Pre-load Epoch 0 reference for this specific seed
+    w0_dict = {}
+    if not all_ckpts:
+        print(f"Skipping {run_dir.name}: No checkpoints found.")
+        return []
+
+    first_ckpt = torch.load(all_ckpts[0], map_location="cpu", weights_only=True)
+    w0_state = first_ckpt.get("model_state", first_ckpt.get("state_dict", first_ckpt))
+
+    for k, v in w0_state.items():
+        if "weight" in k:
+            # Store as float32 for metric precision
+            w0_dict[k] = v.to(torch.float32).clone().numpy()
+
+    del first_ckpt, w0_state
+
+    # Append final_model to process it last
+    final_pth = ckpt_dir / "final_model.pth"
+    if final_pth.exists():
+        all_ckpts.append(final_pth)
+
+    # 3. Process Checkpoints
+    for ckpt in all_ckpts:
+        if "final_model" in ckpt.name:
+            epoch_val = final_epoch
+        else:
+            match = re.search(r"epoch_(\d+)", ckpt.name)
+            epoch_val = int(match.group(1)) if match else -1
+
+        checkpoint = torch.load(ckpt, map_location="cpu", weights_only=True)
+        state_dict = checkpoint.get("model_state", checkpoint.get("state_dict", checkpoint))
+
+        for key, tensor in state_dict.items():
+            if "weight" in key and key in w0_dict:
+                w0 = w0_dict[key]
+
+                # Handle precision artifacts for final_model
+                if "final_model" in ckpt.name:
+                    w_np = tensor.to(torch.bfloat16).to(torch.float32).numpy()
+                else:
+                    w_np = tensor.to(torch.float32).numpy()
+
+                # Calculate Metrics
+                fingerprint = get_layer_fingerprint(w_np)
+                diff_print = get_difference_fingerprint(w_np, w0)
+
+                # Store flat record
+                row = {**metadata, "epoch": epoch_val, "layer": key}
+                row.update(fingerprint)
+                row.update(diff_print)
+                records.append(row)
+
+        del checkpoint, state_dict
+
+    print(f"Finished Seed {seed_val} for Alpha {metadata['alpha']}")
+    del w0_dict
+    gc.collect()
+    return records
+
+
+def collect_sweep_metrics(sweep_dir, max_workers=4, output_path="sweep_metrics.parquet"):
+    """
+    Iterates through a sweep, identifies seeds from folder names,
+    calculates metrics per layer/epoch/seed, and saves to Parquet.
+    """
+    sweep_path = Path(sweep_dir)
     config_files = list(sweep_path.rglob("run_config.json"))
-    print(f"Found {len(config_files)} runs. Starting metric extraction...")
 
-    for cfg_path in config_files:
-        run_dir = cfg_path.parent
-        ckpt_dir = run_dir / "checkpoints"
+    all_records = []
 
-        # Load Metadata
-        with open(cfg_path, "r") as f:
-            cfg = json.load(f)
+    # max_workers=4 is a safe start for HPC.
+    # Don't exceed the number of CPU cores assigned to your job/session.
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # map() handles passing the config_files to the worker function
+        results = list(tqdm(executor.map(process_single_run, config_files),
+                            total=len(config_files),
+                            desc="Parallel Sweep Processing"))
 
-        # Pull parameters
-        metadata = {
-            "init_alpha": cfg["ht_config"].get("alpha"),
-            "init_sigma": cfg["ht_config"].get("g"),
-        }
-        final_epoch = cfg["hyperparams"].get("epochs")
+    # results is a list of lists (one list per run) -> Flatten it
+    for run_records in results:
+        all_records.extend(run_records)
 
-        # 2. Identify and Sort Checkpoints
-        all_ckpts = list(ckpt_dir.glob("weights_epoch_*.pth"))
-
-        # Sort by epoch number to ensure we hit 0 first
-        all_ckpts.sort(key=lambda x: int(re.search(r"epoch_(\d+)", x.name).group(1)))
-
-        # Pre-load Epoch 0 to serve as our reference for cumulative difference
-        w0_dict = {}
-        first_ckpt = torch.load(all_ckpts[0], map_location="cpu", weights_only=True)
-        w0_state = first_ckpt.get(
-            "model_state", first_ckpt.get("state_dict", first_ckpt)
-        )
-        for k, v in w0_state.items():
-            if "weight" in k:
-                w0_dict[k] = v.to(torch.float32).clone()
-
-        # Add final_model to the end of the list after sorting
-        final_pth = ckpt_dir / "final_model.pth"
-        if final_pth.exists():
-            all_ckpts.append(final_pth)
-
-        for ckpt in all_ckpts:
-            # Determine epoch number
-            if "final_model" in ckpt.name:
-                epoch_val = final_epoch
-            else:
-                match = re.search(r"epoch_(\d+)", ckpt.name)
-                epoch_val = int(match.group(1)) if match else -1
-
-            # 3. STREAMING LOAD: Open, Compute, Discard
-            checkpoint = torch.load(ckpt, map_location="cpu", weights_only=True)
-            state_dict = checkpoint.get("model_state", checkpoint)
-            if "state_dict" in checkpoint:
-                state_dict = checkpoint["state_dict"]
-
-            for key, tensor in state_dict.items():
-                if "weight" in key and key in w0_dict:
-                    # Calculate metric immediately
-                    # If final snapshot, we downcast to bfloat16 first to avoid artifacts
-                    w0 = w0_dict[key].numpy()
-                    if "final_model" in ckpt.name:
-                        w_np = tensor.to(torch.bfloat16).to(torch.float32).numpy()
-                    else:
-                        w_np = tensor.to(torch.float32).numpy()
-
-                    fingerprint = get_layer_fingerprint(w_np)
-                    diff_print = get_difference_fingerprint(w_np, w0)
-
-                    row = {**metadata, "epoch": epoch_val, "layer": key}
-                    row.update(fingerprint)
-                    row.update(diff_print)
-                    records.append(row)
-
-            # 4. MEMORY CLEANUP: Clear the heavy objects
-            del checkpoint
-            del state_dict
-            # We don't gc.collect() every single file (too slow),
-            # but every run is a good balance.
-
-        print(f"Finished: {run_dir.parent.name}")
-        del w0_dict
-        gc.collect()
-
-    # 5. Save the lightweight results
-    df = pd.DataFrame(records)
-    df.to_csv(output_name, index=False)
-    print(f"Done! Results saved to {output_name}")
+    df = pd.DataFrame(all_records)
+    df.to_parquet(output_path, index=False)
     return df
 
 
