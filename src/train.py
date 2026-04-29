@@ -178,9 +178,17 @@ def train_model(
                         model.parameters(), hyperparams["grad_clip"]
                     )
 
+                current_grads = torch.cat(
+                    [
+                        p.grad.detach().view(-1)
+                        for p in model.parameters()
+                        if p.grad is not None
+                    ]
+                )
+
                 optimizer.step()
 
-                step_tamsd_tracker.update(model)
+                step_tamsd_tracker.update(model, current_grads=current_grads)
 
                 train_loss += loss.item()
                 _, predicted = outputs.max(1)
@@ -417,14 +425,6 @@ if __name__ == "__main__":
     g = ht_config.get("g", 1.0)
 
     if isinstance(alpha, list) or isinstance(g, list):
-        run_parameter_sweep(
-            config_path,
-            num_seeds=num_to_run,
-            start_seed=start_seed
-        )
+        run_parameter_sweep(config_path, num_seeds=num_to_run, start_seed=start_seed)
     else:
-        run_experiment(
-            config_path,
-            num_seeds=num_to_run,
-            start_seed=start_seed
-        )
+        run_experiment(config_path, num_seeds=num_to_run, start_seed=start_seed)

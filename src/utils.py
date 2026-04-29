@@ -422,11 +422,9 @@ def collect_run_snapshots(run_path):
             # Physics analysis typically targets weight matrices
             if "weight" in key:
                 # Convert the standardized tensor to a flattened numpy array
-                snapshot_data.append({
-                    "epoch": epoch,
-                    "layer": key,
-                    "weights": tensor.numpy().flatten()
-                })
+                snapshot_data.append(
+                    {"epoch": epoch, "layer": key, "weights": tensor.numpy().flatten()}
+                )
 
     # 4. Consolidate into a structured DataFrame
     df = pd.DataFrame(snapshot_data)

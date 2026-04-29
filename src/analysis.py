@@ -26,72 +26,161 @@ from .utils import (
 
 
 class ModelTracker:
-    """
-    Optimized tracker for high-end GPUs.
-    Tracks multiple lag times (tau) across all layers simultaneously.
-    """
-
     def __init__(self, model, lags=[1, 2, 4, 8, 16, 32, 64, 128]):
         self.lags = sorted(lags)
         self.max_lag = max(self.lags)
-        self.layer_names = [n for n, p in model.named_parameters() if p.requires_grad]
 
-        # History of flattened weight vectors (keep on GPU!)
+        # Determine layer slices once to avoid looping names during update
+        self.param_metadata = []
+        start_idx = 0
+        for name, p in model.named_parameters():
+            if p.requires_grad:
+                num_params = p.numel()
+                self.param_metadata.append(
+                    {
+                        "name": name,
+                        "start": start_idx,
+                        "end": start_idx + num_params,
+                        "shape": p.shape,
+                    }
+                )
+                start_idx += num_params
+
+        # History of the ENTIRE network state as a single vector on GPU
         self.history = deque(maxlen=self.max_lag + 1)
 
-        # Storage for raw data: {layer_name: {tau: [list_of_displacements]}}
-        self.raw_data = {
-            name: {tau: [] for tau in self.lags} for name in self.layer_names
-        }
+        # Buffer to store results on GPU to avoid .item() calls
+        # format: [tau_idx, metric_idx (net, l1, l2)]
+        self.results_buffer = []
 
     @torch.no_grad()
-    def update(self, model):
-        # Capture state on GPU
-        current_state = {
-            n: p.detach().clone().view(-1)
-            for n, p in model.named_parameters() if p.requires_grad
-        }
-        self.history.append(current_state)
+    def update(self, model, current_grads=None):
+        # 1. Vectorize state on GPU (Zero Sync-Tax)
+        current_flat = torch.cat(
+            [p.detach().clone().view(-1) for p in model.parameters() if p.requires_grad]
+        )
+        self.history.append(current_flat)
 
-        # Calculate displacements
+        if len(self.history) <= 1:
+            return
+
+        flat_grads = None
+        if current_grads is not None:
+            if isinstance(current_grads, (list, tuple)):
+                flat_grads = torch.cat(
+                    [g.view(-1) for g in current_grads if g is not None]
+                )
+            else:
+                flat_grads = current_grads
+
+        step_results = []
         for tau in self.lags:
             if len(self.history) > tau:
-                past_state = self.history[-(tau + 1)]
-                for name in self.layer_names:
-                    diff = current_state[name] - past_state[name]
+                past_flat = self.history[-(tau + 1)]
+                diff = current_flat - past_flat  # [Total_Params]
 
-                    # 1. Net Movement (The Drift / Center of Mass)
-                    net_diff = torch.mean(diff).item()
+                tau_metrics = []
+                for meta in self.param_metadata:
+                    # Slice vectorized diff for this layer
+                    layer_diff = diff[meta["start"] : meta["end"]]
 
-                    # 2. Absolute Movement (The Total Activity)
-                    abs_diff = torch.mean(torch.abs(diff)).item()
+                    # --- BASIC KINETICS ---
+                    net = torch.mean(layer_diff)
+                    abs_mean_dist = torch.mean(torch.abs(layer_diff))
+                    rms = torch.sqrt(
+                        torch.mean(layer_diff**2)
+                    )  # Lévy Flight detector [cite: 1857-1858]
+                    l_inf = torch.max(
+                        torch.abs(layer_diff)
+                    )  # Single-weight jump detector [cite: 1858]
 
-                    # 3. Root Mean Square Movement (The Energy / Variance)
-                    rms_diff = torch.sqrt(torch.mean(diff ** 2)).item()
+                    # --- GEOMETRIC REALIGNMENT ---
+                    past_layer = past_flat[meta["start"] : meta["end"]]
+                    curr_layer = current_flat[meta["start"] : meta["end"]]
+                    norm_prod = (
+                        torch.norm(curr_layer) * torch.norm(past_layer)
+                    ) + 1e-12
+                    cos_dist = 1.0 - torch.clamp(
+                        (torch.dot(curr_layer, past_layer) / norm_prod),
+                        min=-1.0,
+                        max=1.0,
+                    )
 
-                    # Log as a tuple or dict
-                    self.raw_data[name][tau].append((net_diff, abs_diff, rms_diff))
+                    # --- NEW: SIGNAL-TO-NOISE RATIO (SNR) ---
+                    # Measures coherence of learning signal [cite: 1845-1846]
+                    std_diff = torch.std(layer_diff) + 1e-12
+                    snr = torch.abs(net) / std_diff
+
+                    # --- NEW: GRADIENT-WEIGHT ALIGNMENT (GWA) ---
+                    # Measures Force-Velocity coupling [cite: 2167-2171]
+                    alignment = torch.tensor(0.0, device=current_flat.device)
+                    if flat_grads is not None:
+                        layer_grad = flat_grads[meta["start"] : meta["end"]]
+                        grad_norm_prod = (
+                            torch.norm(layer_grad) * torch.norm(layer_diff)
+                        ) + 1e-12
+                        alignment = torch.dot(-layer_grad, layer_diff) / grad_norm_prod
+
+                    # Stack all 7 metrics (Ordered for to_dataframe)
+                    tau_metrics.append(
+                        torch.stack(
+                            [net, abs_mean_dist, rms, l_inf, cos_dist, snr, alignment]
+                        )
+                    )
+
+                step_results.append(torch.stack(tau_metrics))  # [Num_Layers, 7]
+            else:
+                step_results.append(
+                    torch.zeros(
+                        (len(self.param_metadata), 7), device=current_flat.device
+                    )
+                )
+
+        self.results_buffer.append(
+            torch.stack(step_results)
+        )  # [Num_Lags, Num_Layers, 7]
 
     def to_dataframe(self, alpha, sigma, scale=1):
         """
-        Converts internal raw_data into a flattened DataFrame.
-        'scale' allows converting Epochs -> Steps automatically.
+        Moves all results to CPU in ONE batch and formats for Parquet.
         """
+        if not self.results_buffer:
+            return pd.DataFrame()
+
+        # Batch move to CPU
+        all_data = torch.stack(self.results_buffer).cpu().numpy()
+        num_steps, num_lags, num_layers, num_metrics = all_data.shape
+
+        # Vectorized construction is better, but since it's one-shot,
+        # let's just fix your loop logic:
         rows = []
-        for layer, lags in self.raw_data.items():
-            for tau, values in lags.items():
-                unified_tau = int(tau) * scale
-                for step_idx, (net, l1, l2) in enumerate(values):
-                    rows.append({
-                        "alpha": alpha,
-                        "sigma": sigma,
-                        "layer": layer,
-                        "time_lag": unified_tau,
-                        "step": (step_idx + tau - (tau / 2)) * scale, # Centers the epoch movement
-                        "net_drift": net,
-                        "l1_dist": l1,
-                        "l2_dist": l2
-                    })
+        for s_idx in range(num_steps):
+            for l_idx, tau in enumerate(self.lags):
+                # Only log if the metric isn't NaN (meaning the lag was valid)
+                if s_idx < tau:
+                    continue
+
+                for lyr_idx, meta in enumerate(self.param_metadata):
+                    metrics = all_data[s_idx, l_idx, lyr_idx]
+
+                    rows.append(
+                        {
+                            "alpha_init": alpha,
+                            "sigma_init": sigma,
+                            "layer": meta["name"],
+                            "time_lag": int(tau * scale),
+                            # s_idx is the 'current' time.
+                            # Center the step: (Current - (Lag/2))
+                            "step": (s_idx + 1 - (tau / 2)) * scale,
+                            "net_drift": metrics[0],
+                            "abs_mean_dist": metrics[1],
+                            "rms_dist": metrics[2],
+                            "l_inf_dist": metrics[3],
+                            "cos_dist": metrics[4],
+                            "snr": metrics[5],
+                            "grad_weight_alignment": metrics[6],
+                        }
+                    )
         return pd.DataFrame(rows)
 
 
@@ -103,8 +192,9 @@ def get_layer_fingerprint(W, W0):
 
     cheap_metrics = {
         "frobenius": fro_norm,
-        "max_weight_ratio": torch.max(W_abs).item() / (torch.mean(W_abs).item() + 1e-12),
-        "est_alpha": mcculloch_estimator(W) # Assumes this is element-wise/quantile
+        "max_weight_ratio": torch.max(W_abs).item()
+        / (torch.mean(W_abs).item() + 1e-12),
+        "est_alpha": mcculloch_estimator(W),  # Assumes this is element-wise/quantile
     }
 
     # --- 2. THE SVD CLUSTER (ONE SVD CALL) ---
@@ -122,10 +212,10 @@ def get_layer_fingerprint(W, W0):
     spectral_metrics = {
         "spectral_norm": s_max,
         "stable_rank": (fro_norm**2) / (s_max**2 + 1e-12),
-        "participation_ratio": (np.sum(s_sq)**2) / (np.sum(s_sq**2) + 1e-12),
+        "participation_ratio": (np.sum(s_sq) ** 2) / (np.sum(s_sq**2) + 1e-12),
         "effective_rank": np.exp(entropy),
         "spectral_gap": s_max / (s_list[1] + 1e-12) if len(s_list) > 1 else 1.0,
-        "condition_number": s_max / (s_list[-1] + 1e-12)
+        "condition_number": s_max / (s_list[-1] + 1e-12),
     }
 
     # --- 3. THE HISTORICAL CLUSTER (W vs W0) ---
@@ -139,7 +229,7 @@ def get_layer_fingerprint(W, W0):
     history_metrics = {
         "diff_norm_abs": dist_abs,
         "cosine_sim": cos_sim,
-        "sign_agreement": sign_agree
+        "sign_agreement": sign_agree,
     }
 
     # Merge all into one record
@@ -165,7 +255,7 @@ def process_single_run(cfg_path):
         "alpha_init": cfg["ht_config"].get("alpha"),
         "sigma_init": cfg["ht_config"].get("g"),
         "seed": seed_val,
-        "run_name": run_dir.name # Helpful for debugging later
+        "run_name": run_dir.name,  # Helpful for debugging later
     }
     final_epoch = cfg["hyperparams"].get("epochs")
 
@@ -204,7 +294,9 @@ def process_single_run(cfg_path):
             epoch_val = int(match.group(1)) if match else -1
 
         checkpoint = torch.load(ckpt, map_location="cpu", weights_only=True)
-        state_dict = checkpoint.get("model_state", checkpoint.get("state_dict", checkpoint))
+        state_dict = checkpoint.get(
+            "model_state", checkpoint.get("state_dict", checkpoint)
+        )
 
         for key, tensor in state_dict.items():
             if "weight" in key and key in w0_dict:
@@ -232,7 +324,9 @@ def process_single_run(cfg_path):
     return records
 
 
-def collect_sweep_metrics(sweep_dir, max_workers=4, output_path="sweep_metrics.parquet"):
+def collect_sweep_metrics(
+    sweep_dir, max_workers=4, output_path="sweep_metrics.parquet"
+):
     """
     Iterates through a sweep, identifies seeds from folder names,
     calculates metrics per layer/epoch/seed, and saves to Parquet.
@@ -246,9 +340,13 @@ def collect_sweep_metrics(sweep_dir, max_workers=4, output_path="sweep_metrics.p
     # Don't exceed the number of CPU cores assigned to your job/session.
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         # map() handles passing the config_files to the worker function
-        results = list(tqdm(executor.map(process_single_run, config_files),
-                            total=len(config_files),
-                            desc="Parallel Sweep Processing"))
+        results = list(
+            tqdm(
+                executor.map(process_single_run, config_files),
+                total=len(config_files),
+                desc="Parallel Sweep Processing",
+            )
+        )
 
     # results is a list of lists (one list per run) -> Flatten it
     for run_records in results:
@@ -259,7 +357,9 @@ def collect_sweep_metrics(sweep_dir, max_workers=4, output_path="sweep_metrics.p
     return df
 
 
-def aggregate_displacement_sweep(sweep_dir, output_name="master_displacement_database.parquet"):
+def aggregate_displacement_sweep(
+    sweep_dir, output_name="master_displacement_database.parquet"
+):
     """
     Concatenates individual run-level Parquet files into a master research database.
     Assumes each run directory contains a 'displacement_log.parquet' and 'run_config.json'.
@@ -304,11 +404,13 @@ def aggregate_displacement_sweep(sweep_dir, output_name="master_displacement_dat
         master_df = pd.concat(all_dfs, ignore_index=True)
 
         # Enforce strict numeric types for physics queries
-        master_df["alpha"] = pd.to_numeric(master_df["alpha"], errors='coerce')
-        master_df["sigma"] = pd.to_numeric(master_df["sigma"], errors='coerce')
+        master_df["alpha"] = pd.to_numeric(master_df["alpha"], errors="coerce")
+        master_df["sigma"] = pd.to_numeric(master_df["sigma"], errors="coerce")
 
         # Save using ZSTD for better compression on these repetitive signals
-        master_df.to_parquet(output_name, engine='pyarrow', compression='zstd', index=False)
+        master_df.to_parquet(
+            output_name, engine="pyarrow", compression="zstd", index=False
+        )
 
         print("--- SUCCESS ---")
         print(f"Master database saved to: {output_name}")
@@ -321,7 +423,9 @@ def aggregate_displacement_sweep(sweep_dir, output_name="master_displacement_dat
         return None
 
 
-def collect_correlations_from_json(sweep_dir, method="spearman", output_name="layer_correlations.csv"):
+def collect_correlations_from_json(
+    sweep_dir, method="spearman", output_name="layer_correlations.csv"
+):
     """
     Computes a 10x10 correlation matrix for each lag time (delta_t) across runs.
     Methods: 'pearson', 'spearman', or 'dcor'
@@ -334,7 +438,8 @@ def collect_correlations_from_json(sweep_dir, method="spearman", output_name="la
     for cfg_path in config_files:
         run_dir = cfg_path.parent
         tamsd_json_path = run_dir / "tamsd_results.json"
-        if not tamsd_json_path.exists(): continue
+        if not tamsd_json_path.exists():
+            continue
 
         with open(cfg_path, "r") as f:
             cfg = json.load(f)
@@ -342,7 +447,11 @@ def collect_correlations_from_json(sweep_dir, method="spearman", output_name="la
         # Metadata extraction
         alpha = cfg["ht_config"].get("alpha", "unknown")
         g_val = cfg["ht_config"].get("g", "unknown")
-        metadata = {"alpha": alpha, "sigma": g_val, "run_id": f"alpha_{alpha}_g_{g_val}"}
+        metadata = {
+            "alpha": alpha,
+            "sigma": g_val,
+            "run_id": f"alpha_{alpha}_g_{g_val}",
+        }
 
         with open(tamsd_json_path, "r") as f:
             raw_data = json.load(f)
@@ -384,17 +493,19 @@ def collect_correlations_from_json(sweep_dir, method="spearman", output_name="la
             # --- STEP 3: Flattening for Storage ---
             for i, l_i in enumerate(layers):
                 for j, l_j in enumerate(layers):
-                    all_results.append({
-                        **metadata,
-                        "delta_t": tau,
-                        "method": method,
-                        "layer_A": l_i,
-                        "layer_B": l_j,
-                        "correlation": corr_matrix[i, j]
-                    })
+                    all_results.append(
+                        {
+                            **metadata,
+                            "delta_t": tau,
+                            "method": method,
+                            "layer_A": l_i,
+                            "layer_B": l_j,
+                            "correlation": corr_matrix[i, j],
+                        }
+                    )
 
         print(f"Processed Correlations ({method}): {metadata['run_id']}")
-        del raw_data # Free RAM
+        del raw_data  # Free RAM
 
     if all_results:
         df = pd.DataFrame(all_results)
