@@ -244,8 +244,12 @@ old_results/
 *.run.xml
 *.synctex.gz
 *.toc
+
+# Misc
 .rsync-exclude
 thesis/thesis.pdf
 research_plan/research_plan.pdf
 tamsd_results.json
 *.pbs
+*.sh
+**/checkpoints

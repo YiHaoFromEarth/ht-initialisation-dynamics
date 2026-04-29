@@ -127,7 +127,7 @@ def get_layer_fingerprint(W):
     # --- EXTENSIBLE METRIC SECTION ---
     # You can add new metrics here easily.
     fingerprint = {
-        "alpha": mcculloch_estimator(W_torch),
+        "est_alpha": mcculloch_estimator(W_torch),
         "spectral_norm": spectral_norm(W_torch),
         "spectral_gap": spectral_gap(W_torch),
         "stable_rank": stable_rank(W_torch),
@@ -174,8 +174,8 @@ def process_single_run(cfg_path):
         cfg = json.load(f)
 
     metadata = {
-        "alpha": cfg["ht_config"].get("alpha"),
-        "sigma": cfg["ht_config"].get("g"),
+        "alpha_init": cfg["ht_config"].get("alpha"),
+        "sigma_init": cfg["ht_config"].get("g"),
         "seed": seed_val,
         "run_name": run_dir.name # Helpful for debugging later
     }
@@ -240,7 +240,7 @@ def process_single_run(cfg_path):
 
         del checkpoint, state_dict
 
-    print(f"Finished Seed {seed_val} for Alpha {metadata['alpha']}")
+    print(f"Finished Seed {seed_val} for Alpha {metadata['alpha_init']}")
     del w0_dict
     gc.collect()
     return records
