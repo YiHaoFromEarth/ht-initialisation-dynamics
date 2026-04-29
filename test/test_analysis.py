@@ -9,7 +9,6 @@ from pathlib import Path
 from src.utils import get_layer_from_checkpoint
 from src.analysis import (
     ModelTracker,
-    get_singular_values,
     evaluate_spectral_perturbation,
     run_spectral_analysis,
 )
@@ -27,24 +26,6 @@ class ToyLinear(nn.Module):
 
     def forward(self, x):
         return self.fc(x)
-
-
-def test_singular_values_identity():
-    """
-    Verify raw singular values (nu) for an Identity matrix.
-    Per PhysRevE 106 054124, we analyze nu directly, not s^2/M.
-    """
-    size = 100
-    identity = torch.eye(size)
-
-    # Extract nu using the updated function
-    nu = get_singular_values(identity)
-
-    # 1. Identity singular values are exactly 1.0
-    assert np.allclose(nu, 1.0), "Singular values of Identity should be 1.0"
-
-    # 2. Dimensions must match the smaller axis (m)
-    assert len(nu) == size, f"Expected {size} singular values"
 
 
 def test_rigorous_perturbation():

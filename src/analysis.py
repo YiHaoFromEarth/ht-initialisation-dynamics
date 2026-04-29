@@ -13,14 +13,7 @@ from concurrent.futures import ProcessPoolExecutor
 from tqdm import tqdm
 from scipy.stats import spearmanr
 from .rmt import fit_marcenkoPastur
-from .equations import (
-    mcculloch_estimator,
-    relative_frobenius_norm,
-    spectral_norm,
-    spectral_gap,
-    layerwise_cosine,
-    stable_rank,
-)
+from .equations import mcculloch_estimator
 from .utils import (
     load_master_config,
     get_dataset_class,
@@ -102,60 +95,55 @@ class ModelTracker:
         return pd.DataFrame(rows)
 
 
-def get_singular_values(matrix):
-    """
-    Extracts singular values from a matrix.
-    """
-    if isinstance(matrix, np.ndarray):
-        matrix = torch.from_numpy(matrix)
+def get_layer_fingerprint(W, W0):
+    # --- 1. PRE-CALCULATION & CHEAP METRICS ---
+    W_abs = torch.abs(W)
+    fro_norm = torch.linalg.norm(W).item()
+    fro_norm0 = torch.linalg.norm(W0).item()
 
-    # Paper analyzes singular values directly
-    s = torch.linalg.svdvals(matrix.float())
-    return s.numpy()
-
-
-def get_layer_fingerprint(W):
-    """
-    Modular fingerprinting for a single weight matrix.
-    Add any new metric by simply adding a key-value pair to the dict.
-    """
-    if torch.is_tensor(W):
-        W_torch = W.float()
-    else:
-        W_torch = torch.from_numpy(W).float()
-
-    # --- EXTENSIBLE METRIC SECTION ---
-    # You can add new metrics here easily.
-    fingerprint = {
-        "est_alpha": mcculloch_estimator(W_torch),
-        "spectral_norm": spectral_norm(W_torch),
-        "spectral_gap": spectral_gap(W_torch),
-        "stable_rank": stable_rank(W_torch),
+    cheap_metrics = {
+        "frobenius": fro_norm,
+        "max_weight_ratio": torch.max(W_abs).item() / (torch.mean(W_abs).item() + 1e-12),
+        "est_alpha": mcculloch_estimator(W) # Assumes this is element-wise/quantile
     }
 
-    return fingerprint
+    # --- 2. THE SVD CLUSTER (ONE SVD CALL) ---
+    # We use CPU for SVD as it's often more stable for large matrices in parallel workers
+    # but torch.linalg.svdvals is very fast.
+    s = torch.linalg.svdvals(W)
+    s_list = s.detach().cpu().numpy()
+    s_sq = s_list**2
+    s_max = s_list[0]
 
+    # Effective Rank Entropy
+    s_normed = s_list / (np.sum(s_list) + 1e-12)
+    entropy = -np.sum(s_normed * np.log(s_normed + 1e-12))
 
-def get_difference_fingerprint(W, W0):
-    """
-    Modular fingerprinting for the difference between a snapshot and the initial.
-    Add any new metric by simply adding a key-value pair to the dict.
-    """
-    if torch.is_tensor(W):
-        W_torch = W.float()
-        W0_torch = W0.float()
-    else:
-        W_torch = torch.from_numpy(W).float()
-        W0_torch = torch.from_numpy(W0).float()
-
-    # --- EXTENSIBLE METRIC SECTION ---
-    # You can add new metrics here easily.
-    fingerprint = {
-        "frobenius": relative_frobenius_norm(W_torch, W0_torch),
-        "layerwise_cosine": layerwise_cosine(W_torch, W0_torch),
+    spectral_metrics = {
+        "spectral_norm": s_max,
+        "stable_rank": (fro_norm**2) / (s_max**2 + 1e-12),
+        "participation_ratio": (np.sum(s_sq)**2) / (np.sum(s_sq**2) + 1e-12),
+        "effective_rank": np.exp(entropy),
+        "spectral_gap": s_max / (s_list[1] + 1e-12) if len(s_list) > 1 else 1.0,
+        "condition_number": s_max / (s_list[-1] + 1e-12)
     }
 
-    return fingerprint
+    # --- 3. THE HISTORICAL CLUSTER (W vs W0) ---
+    dist_abs = torch.linalg.norm(W - W0).item()
+    dot_product = torch.sum(W * W0).item()
+    cos_sim = dot_product / (fro_norm * fro_norm0 + 1e-12)
+
+    # Sign Agreement (Physics: "Domain flipping")
+    sign_agree = torch.mean((torch.sign(W) == torch.sign(W0)).float()).item()
+
+    history_metrics = {
+        "diff_norm_abs": dist_abs,
+        "cosine_sim": cos_sim,
+        "sign_agreement": sign_agree
+    }
+
+    # Merge all into one record
+    return {**cheap_metrics, **spectral_metrics, **history_metrics}
 
 
 def process_single_run(cfg_path):
@@ -198,7 +186,7 @@ def process_single_run(cfg_path):
     for k, v in w0_state.items():
         if "weight" in k:
             # Store as float32 for metric precision
-            w0_dict[k] = v.to(torch.float32).clone().numpy()
+            w0_dict[k] = v.to(torch.float32).clone()
 
     del first_ckpt, w0_state
 
@@ -224,18 +212,16 @@ def process_single_run(cfg_path):
 
                 # Handle precision artifacts for final_model
                 if "final_model" in ckpt.name:
-                    w_np = tensor.to(torch.bfloat16).to(torch.float32).numpy()
+                    w_np = tensor.to(torch.bfloat16).to(torch.float32)
                 else:
-                    w_np = tensor.to(torch.float32).numpy()
+                    w_np = tensor.to(torch.float32)
 
                 # Calculate Metrics
-                fingerprint = get_layer_fingerprint(w_np)
-                diff_print = get_difference_fingerprint(w_np, w0)
+                fingerprint = get_layer_fingerprint(w_np, w0)
 
                 # Store flat record
                 row = {**metadata, "epoch": epoch_val, "layer": key}
                 row.update(fingerprint)
-                row.update(diff_print)
                 records.append(row)
 
         del checkpoint, state_dict

@@ -441,14 +441,14 @@ def collect_run_snapshots(run_path):
 def collect_sweep_learning_curves(sweep_dir):
     """
     Iterates through the sweep and pulls train/test loss and accuracy
-    from every 'train_log.csv' into one master DataFrame.
+    from every 'train_log.csv' into one master DataFrame, supporting seeds.
     """
     sweep_path = Path(sweep_dir)
     all_run_logs = []
 
     # 1. Find all run_config files to locate the runs
     configs = list(sweep_path.rglob("run_config.json"))
-    print(f"Found {len(configs)} training logs. Aggregating...")
+    print(f"Found {len(configs)} training runs. Aggregating logs...")
 
     for cfg_path in configs:
         run_dir = cfg_path.parent
@@ -458,23 +458,34 @@ def collect_sweep_learning_curves(sweep_dir):
             print(f"Warning: Log missing for {run_dir.name}")
             continue
 
-        # 2. Load Metadata
+        # 2. Extract Seed from folder name (e.g., ..._s0)
+        seed_match = re.search(r"_s(\d+)$", run_dir.name)
+        seed_val = int(seed_match.group(1)) if seed_match else 0
+
+        # 3. Load Metadata
         with open(cfg_path, "r") as f:
             cfg = json.load(f)
 
+        # Use distinct names to avoid collision with empirical metrics
         a_init = cfg["ht_config"].get("alpha")
         s_init = cfg["ht_config"].get("g")
 
-        # 3. Load the actual CSV data
-        run_log = pd.read_csv(log_path)
+        # 4. Load the actual CSV data
+        try:
+            run_log = pd.read_csv(log_path)
 
-        # 4. Inject metadata into every row of this run
-        run_log["alpha"] = a_init
-        run_log["sigma"] = s_init
+            # 5. Inject metadata into every row of this run
+            run_log["alpha"] = a_init
+            run_log["sigma"] = s_init
+            run_log["seed"] = seed_val
+            run_log["run_name"] = run_dir.name
 
-        all_run_logs.append(run_log)
+            all_run_logs.append(run_log)
+        except Exception as e:
+            print(f"Error reading {log_path}: {e}")
+            continue
 
-    # 5. Combine into master Frame
+    # 6. Combine into master Frame
     if not all_run_logs:
         raise ValueError("No training logs found in the provided directory.")
 
