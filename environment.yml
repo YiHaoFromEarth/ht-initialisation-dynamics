@@ -15,6 +15,7 @@ dependencies:
   - tqdm=4.67.1
   - jupyterlab=4.5.0
   - ipykernel=6.31.0
+  - pyarrow
   - pip
   - pip:
       - --extra-index-url https://download.pytorch.org/whl/cu124
@@ -27,3 +28,4 @@ dependencies:
       - networkx==3.5
       - sympy==1.13.1
       - vulture==2.14
+      - dcor
