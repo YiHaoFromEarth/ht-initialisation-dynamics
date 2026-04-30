@@ -8,7 +8,6 @@ import re
 import gc
 import dcor
 from pathlib import Path
-from collections import deque
 from concurrent.futures import ProcessPoolExecutor
 from tqdm import tqdm
 from scipy.stats import spearmanr
@@ -24,164 +23,170 @@ from .utils import (
     evaluate_model,
 )
 
-
 class ModelTracker:
     def __init__(self, model, lags=[1, 2, 4, 8, 16, 32, 64, 128]):
         self.lags = sorted(lags)
         self.max_lag = max(self.lags)
+        self.num_lags = len(self.lags)
 
-        # Determine layer slices once to avoid looping names during update
+        # 1. Metadata setup
         self.param_metadata = []
         start_idx = 0
         for name, p in model.named_parameters():
             if p.requires_grad:
                 num_params = p.numel()
-                self.param_metadata.append(
-                    {
-                        "name": name,
-                        "start": start_idx,
-                        "end": start_idx + num_params,
-                        "shape": p.shape,
-                    }
-                )
+                self.param_metadata.append({
+                    "name": name,
+                    "start": start_idx,
+                    "end": start_idx + num_params,
+                    "shape": p.shape,
+                })
                 start_idx += num_params
 
-        # History of the ENTIRE network state as a single vector on GPU
-        self.history = deque(maxlen=self.max_lag + 1)
+        self.sizes = [m["end"] - m["start"] for m in self.param_metadata]
+        self.num_layers = len(self.param_metadata)
+        total_params = start_idx
 
-        # Buffer to store results on GPU to avoid .item() calls
-        # format: [tau_idx, metric_idx (net, l1, l2)]
+        # Infer device dynamically to avoid hardcoding
+        self.device = next(model.parameters()).device
+
+        # 2. TENSOR BUFFER SETUP
+        self.history_buffer = torch.zeros((self.max_lag + 1, total_params), device=self.device)
+        self.history_filled = 0
+        self.cursor = 0
+
+        # Kept entirely on GPU per your request
         self.results_buffer = []
 
     @torch.no_grad()
-    def update(self, model, current_grads=None):
-        # 1. Vectorize state on GPU (Zero Sync-Tax)
-        current_flat = torch.cat(
-            [p.detach().clone().view(-1) for p in model.parameters() if p.requires_grad]
-        )
-        self.history.append(current_flat)
+    def update(self, model, flat_grads=None):
+        # 1. Capture current state (Avoid creating detached views, just read flat)
+        current_flat = torch.cat([p.view(-1) for p in model.parameters() if p.requires_grad])
 
-        if len(self.history) <= 1:
+        self.history_buffer[self.cursor] = current_flat
+        current_idx = self.cursor
+        self.cursor = (self.cursor + 1) % (self.max_lag + 1)
+        self.history_filled = min(self.history_filled + 1, self.max_lag + 1)
+
+        if self.history_filled <= 1:
             return
 
-        flat_grads = None
-        if current_grads is not None:
-            if isinstance(current_grads, (list, tuple)):
-                flat_grads = torch.cat(
-                    [g.view(-1) for g in current_grads if g is not None]
-                )
+        # 2. Identify Valid Lags
+        valid_lags = [tau for tau in self.lags if self.history_filled > tau]
+        num_valid = len(valid_lags)
+
+        if num_valid == 0:
+            # Pad with zeros if no lags are ready
+            self.results_buffer.append(torch.zeros((self.num_lags, self.num_layers, 7), device=self.device))
+            return
+
+        # Handle Gradients
+        if flat_grads is not None:
+            g_layers = torch.split(flat_grads, self.sizes)
+
+        # 3. VECTORIZE ACROSS ALL LAGS
+        # Fetch all past histories at once -> Shape: (num_valid, total_params)
+        past_indices = [(current_idx - tau) % (self.max_lag + 1) for tau in valid_lags]
+        past_flats = self.history_buffer[past_indices]
+
+        # Compute differences for all lags simultaneously
+        diffs = current_flat.unsqueeze(0) - past_flats
+
+        # Split into layers -> Tuples of (num_valid, layer_size) tensors
+        d_layers = torch.split(diffs, self.sizes, dim=1)
+        p_layers = torch.split(past_flats, self.sizes, dim=1)
+        c_layers = torch.split(current_flat, self.sizes)
+
+        # Pre-calculate current norms to save O(Lags * Layers) redundant math
+        c_norms = [torch.norm(c) for c in c_layers]
+
+        nets_list, abs_means_list, rmss_list = [], [], []
+        linfs_list, cos_dists_list, snrs_list, align_list = [], [], [], []
+
+        # 4. Compute Metrics per layer (Loops `L` times instead of `L * Lags` times)
+        for l_idx, (d, c, p, c_norm) in enumerate(zip(d_layers, c_layers, p_layers, c_norms)):
+            # d is shape (num_valid, layer_size)
+            nets_list.append(d.mean(dim=1))
+            abs_means_list.append(d.abs().mean(dim=1))
+            rmss_list.append(torch.sqrt((d**2).mean(dim=1)))
+            linfs_list.append(d.abs().max(dim=1).values)
+            snrs_list.append(d.mean(dim=1).abs() / (d.std(dim=1) + 1e-12))
+
+            # Cosine distance using ultra-fast Matrix Multiplication instead of dot products
+            # p @ c -> (num_valid, layer_size) @ (layer_size,) -> (num_valid,)
+            dot_cp = torch.matmul(p, c)
+            p_norms = torch.norm(p, dim=1)
+            norm_cp = (c_norm * p_norms) + 1e-12
+            cos_dists_list.append(1.0 - torch.clamp(dot_cp / norm_cp, -1.0, 1.0))
+
+            # Gradient alignment
+            if flat_grads is not None:
+                g = g_layers[l_idx]
+                dot_gd = torch.matmul(d, -g)
+                g_norm = torch.norm(g)
+                d_norms = torch.norm(d, dim=1)
+                norm_gd = (g_norm * d_norms) + 1e-12
+                align_list.append(dot_gd / norm_gd)
             else:
-                flat_grads = current_grads
+                align_list.append(torch.zeros(num_valid, device=self.device))
 
-        step_results = []
-        for tau in self.lags:
-            if len(self.history) > tau:
-                past_flat = self.history[-(tau + 1)]
-                diff = current_flat - past_flat  # [Total_Params]
+        # Stack the results into a single matrix of shape (num_valid, num_layers, 7)
+        metrics = torch.stack([
+            torch.stack(nets_list, dim=1),
+            torch.stack(abs_means_list, dim=1),
+            torch.stack(rmss_list, dim=1),
+            torch.stack(linfs_list, dim=1),
+            torch.stack(cos_dists_list, dim=1),
+            torch.stack(snrs_list, dim=1),
+            torch.stack(align_list, dim=1)
+        ], dim=2)
 
-                tau_metrics = []
-                for meta in self.param_metadata:
-                    # Slice vectorized diff for this layer
-                    layer_diff = diff[meta["start"] : meta["end"]]
+        # Pad remaining invalid lags with zeros to maintain strict (num_lags, num_layers, 7) shape
+        if num_valid < self.num_lags:
+            pad = torch.zeros((self.num_lags - num_valid, self.num_layers, 7), device=self.device)
+            metrics = torch.cat([metrics, pad], dim=0)
 
-                    # --- BASIC KINETICS ---
-                    net = torch.mean(layer_diff)
-                    abs_mean_dist = torch.mean(torch.abs(layer_diff))
-                    rms = torch.sqrt(
-                        torch.mean(layer_diff**2)
-                    )  # Lévy Flight detector [cite: 1857-1858]
-                    l_inf = torch.max(
-                        torch.abs(layer_diff)
-                    )  # Single-weight jump detector [cite: 1858]
+        # 5. Append to GPU buffer
+        self.results_buffer.append(metrics)
 
-                    # --- GEOMETRIC REALIGNMENT ---
-                    past_layer = past_flat[meta["start"] : meta["end"]]
-                    curr_layer = current_flat[meta["start"] : meta["end"]]
-                    norm_prod = (
-                        torch.norm(curr_layer) * torch.norm(past_layer)
-                    ) + 1e-12
-                    cos_dist = 1.0 - torch.clamp(
-                        (torch.dot(curr_layer, past_layer) / norm_prod),
-                        min=-1.0,
-                        max=1.0,
-                    )
-
-                    # --- NEW: SIGNAL-TO-NOISE RATIO (SNR) ---
-                    # Measures coherence of learning signal [cite: 1845-1846]
-                    std_diff = torch.std(layer_diff) + 1e-12
-                    snr = torch.abs(net) / std_diff
-
-                    # --- NEW: GRADIENT-WEIGHT ALIGNMENT (GWA) ---
-                    # Measures Force-Velocity coupling [cite: 2167-2171]
-                    alignment = torch.tensor(0.0, device=current_flat.device)
-                    if flat_grads is not None:
-                        layer_grad = flat_grads[meta["start"] : meta["end"]]
-                        grad_norm_prod = (
-                            torch.norm(layer_grad) * torch.norm(layer_diff)
-                        ) + 1e-12
-                        alignment = torch.dot(-layer_grad, layer_diff) / grad_norm_prod
-
-                    # Stack all 7 metrics (Ordered for to_dataframe)
-                    tau_metrics.append(
-                        torch.stack(
-                            [net, abs_mean_dist, rms, l_inf, cos_dist, snr, alignment]
-                        )
-                    )
-
-                step_results.append(torch.stack(tau_metrics))  # [Num_Layers, 7]
-            else:
-                step_results.append(
-                    torch.zeros(
-                        (len(self.param_metadata), 7), device=current_flat.device
-                    )
-                )
-
-        self.results_buffer.append(
-            torch.stack(step_results)
-        )  # [Num_Lags, Num_Layers, 7]
-
-    def to_dataframe(self, alpha, sigma, scale=1):
+    def to_dataframe(self, alpha, sigma, seed, scale=1):
         """
-        Moves all results to CPU in ONE batch and formats for Parquet.
+        Instantaneous Pandas conversion using NumPy masks instead of nested Python loops.
+        This runs only once at the end of training.
         """
         if not self.results_buffer:
             return pd.DataFrame()
 
-        # Batch move to CPU
+        # Only now do we pay the CPU transfer tax
         all_data = torch.stack(self.results_buffer).cpu().numpy()
         num_steps, num_lags, num_layers, num_metrics = all_data.shape
 
-        # Vectorized construction is better, but since it's one-shot,
-        # let's just fix your loop logic:
-        rows = []
-        for s_idx in range(num_steps):
-            for l_idx, tau in enumerate(self.lags):
-                # Only log if the metric isn't NaN (meaning the lag was valid)
-                if s_idx < tau:
-                    continue
+        # Create flat 1D arrays for highly optimized DataFrame construction
+        steps_flat = np.repeat(np.arange(num_steps), num_lags * num_layers)
+        lags_flat = np.tile(np.repeat(self.lags, num_layers), num_steps)
+        layer_names = [m["name"] for m in self.param_metadata]
+        layers_flat = np.tile(layer_names, num_steps * num_lags)
 
-                for lyr_idx, meta in enumerate(self.param_metadata):
-                    metrics = all_data[s_idx, l_idx, lyr_idx]
+        data_flat = all_data.reshape(-1, num_metrics)
 
-                    rows.append(
-                        {
-                            "alpha_init": alpha,
-                            "sigma_init": sigma,
-                            "layer": meta["name"],
-                            "time_lag": int(tau * scale),
-                            # s_idx is the 'current' time.
-                            # Center the step: (Current - (Lag/2))
-                            "step": (s_idx + 1 - (tau / 2)) * scale,
-                            "net_drift": metrics[0],
-                            "abs_mean_dist": metrics[1],
-                            "rms_dist": metrics[2],
-                            "l_inf_dist": metrics[3],
-                            "cos_dist": metrics[4],
-                            "snr": metrics[5],
-                            "grad_weight_alignment": metrics[6],
-                        }
-                    )
-        return pd.DataFrame(rows)
+        # Apply your logic: Only log if step_idx >= tau
+        mask = steps_flat >= lags_flat
+
+        return pd.DataFrame({
+            "alpha_init": alpha,
+            "sigma_init": sigma,
+            "seed": seed,
+            "layer": layers_flat[mask],
+            "time_lag": (lags_flat[mask] * scale).astype(int),
+            "step": ((steps_flat[mask] + 1 - (lags_flat[mask] // 2)) * scale),
+            "net_drift": data_flat[mask, 0],
+            "abs_mean_dist": data_flat[mask, 1],
+            "rms_dist": data_flat[mask, 2],
+            "l_inf_dist": data_flat[mask, 3],
+            "cos_dist": data_flat[mask, 4],
+            "snr": data_flat[mask, 5],
+            "grad_weight_alignment": data_flat[mask, 6],
+        })
 
 
 def get_layer_fingerprint(W, W0):

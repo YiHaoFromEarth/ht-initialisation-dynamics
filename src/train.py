@@ -188,7 +188,7 @@ def train_model(
 
                 optimizer.step()
 
-                step_tamsd_tracker.update(model, current_grads=current_grads)
+                step_tamsd_tracker.update(model, flat_grads=current_grads)
 
                 train_loss += loss.item()
                 _, predicted = outputs.max(1)
@@ -272,19 +272,60 @@ def train_model(
         a_val = ht_config.get("alpha", "N/A")
         s_val = ht_config.get("g", "N/A")
 
-        # 1. Get DataFrames from both trackers
-        df_step = step_tamsd_tracker.to_dataframe(a_val, s_val, scale=1)
-        df_epoch = epoch_tamsd_tracker.to_dataframe(a_val, s_val, scale=60000 // 1024)
-
-        # 2. Combine and Sort
-        # This creates one master 'Physics' file for the entire run
+        # --- 1. Get DataFrames ---
+        df_step = step_tamsd_tracker.to_dataframe(a_val, s_val, seed, scale=1)
+        df_epoch = epoch_tamsd_tracker.to_dataframe(
+            a_val, s_val, seed, scale=60000 // 1024
+        )
+        # 1. Combine
         master_physics_df = pd.concat([df_step, df_epoch], ignore_index=True)
+
+        # 2. Forced Numeric Downcasting (Parameters & Seed)
+        # We do this FIRST so the category labels themselves are small types
+        master_physics_df["alpha_init"] = master_physics_df["alpha_init"].astype(
+            "float32"
+        )
+        master_physics_df["sigma_init"] = master_physics_df["sigma_init"].astype(
+            "float32"
+        )
+        master_physics_df["seed"] = master_physics_df["seed"].astype("int32")
+
+        # 3. Downcast Metrics (The bulk of the data)
+        float_cols = [
+            "net_drift",
+            "abs_mean_dist",
+            "rms_dist",
+            "l_inf_dist",
+            "cos_dist",
+            "snr",
+            "grad_weight_alignment",
+        ]
+        master_physics_df[float_cols] = master_physics_df[float_cols].astype("float32")
+
+        # 4. Downcast Lags and Steps (Integers)
+        int_cols = ["time_lag", "step"]
+        for col in int_cols:
+            master_physics_df[col] = pd.to_numeric(
+                master_physics_df[col], downcast="integer"
+            )
+
+        # 5. Categorize (The Final Step)
+        # Now that alpha/sigma/seed/layer are the right numeric types, we categorize them
+        # to shrink the column memory to 1-byte per row (int8 codes).
+        cat_cols = ["layer", "alpha_init", "sigma_init", "seed"]
+        for col in cat_cols:
+            master_physics_df[col] = master_physics_df[col].astype("category")
+
+        # 6. Sort and Save
         master_physics_df = master_physics_df.sort_values(
             by=["layer", "time_lag", "step"]
         )
-
-        # 3. Save as a single Parquet (much better than JSON for this volume!)
-        master_physics_df.to_parquet(run_dir / "displacement_log.parquet")
+        master_physics_df.to_parquet(
+            run_dir / "displacement_log.parquet",
+            engine="pyarrow",
+            compression="zstd",
+            index=False,
+        )
 
         return model, run_dir
 
