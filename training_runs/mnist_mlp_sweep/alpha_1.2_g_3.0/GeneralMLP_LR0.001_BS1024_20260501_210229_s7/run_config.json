@@ -1,0 +1,112 @@
+{
+    "model": "GeneralMLP",
+    "model_params": {
+        "kwargs": {
+            "input_size": 784,
+            "hidden_size": 784,
+            "num_classes": 10,
+            "depth": 9,
+            "activation_name": "tanh",
+            "bias": false
+        }
+    },
+    "optimizer": "SGD",
+    "optimizer_params": {
+        "lr": 0.001,
+        "momentum": 0.0,
+        "weight_decay": 0.0
+    },
+    "hyperparams": {
+        "epochs": 650,
+        "seed": 0,
+        "log_freq": 1,
+        "device": "cuda",
+        "save_weights_history": true,
+        "weight_log_epochs": [
+            0,
+            1,
+            2,
+            3,
+            4,
+            5,
+            6,
+            7,
+            8,
+            9,
+            10,
+            15,
+            20,
+            25,
+            30,
+            35,
+            40,
+            45,
+            50,
+            55,
+            60,
+            65,
+            70,
+            75,
+            80,
+            85,
+            90,
+            95,
+            100,
+            120,
+            140,
+            160,
+            180,
+            200,
+            220,
+            240,
+            260,
+            280,
+            300,
+            320,
+            340,
+            360,
+            380,
+            400,
+            420,
+            440,
+            460,
+            480,
+            500,
+            520,
+            540,
+            560,
+            580,
+            600,
+            620,
+            640
+        ]
+    },
+    "data_config": {
+        "dataset_name": "MNIST",
+        "batch_size": 1024,
+        "use_gpu": true,
+        "fast_load": true,
+        "transforms": [
+            {
+                "ToTensor": null
+            },
+            {
+                "Normalize": {
+                    "mean": [
+                        0.1307
+                    ],
+                    "std": [
+                        0.3081
+                    ]
+                }
+            }
+        ],
+        "transform": "Compose(\n    ToTensor()\n    Normalize(mean=[0.1307], std=[0.3081])\n)"
+    },
+    "ht_config": {
+        "enabled": true,
+        "alpha": 1.2,
+        "g": 3.0
+    },
+    "seed": 7
+}
