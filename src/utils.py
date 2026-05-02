@@ -9,6 +9,8 @@ import logging
 import json
 import pandas as pd
 import re
+import os
+import glob
 from torch.utils.data import DataLoader, TensorDataset
 from torchvision import datasets, transforms
 from . import architectures
@@ -643,3 +645,32 @@ def evaluate_model(model, loader, device, criterion):
     accuracy = correct / total if total > 0 else 0
 
     return {"loss": avg_loss, "acc": accuracy}
+
+
+def combine_and_sort_parquets(input_dir, output_path, sort_cols=None):
+    """
+    Combines all .parquet files in a directory and sorts them.
+    """
+    # 1. Grab all parquet files
+    files = glob.glob(os.path.join(input_dir, "*.parquet"))
+
+    if not files:
+        print(f"No parquet files found in {input_dir}")
+        return
+
+    # 2. Read and concatenate
+    # We use a list comprehension for speed
+    df_list = [pd.read_parquet(f) for f in files]
+    combined_df = pd.concat(df_list, ignore_index=True)
+
+    # 3. Sort if columns are provided
+    if sort_cols:
+        # Ensure the columns exist before sorting to avoid crashes
+        existing_cols = [c for c in sort_cols if c in combined_df.columns]
+        combined_df = combined_df.sort_values(by=existing_cols)
+        print(f"Sorted by: {existing_cols}")
+
+    # 4. Save final result
+    combined_df.to_parquet(output_path, index=False)
+    print(f"Successfully combined {len(files)} files.")
+    print(f"Final shape: {combined_df.shape} -> {output_path}")

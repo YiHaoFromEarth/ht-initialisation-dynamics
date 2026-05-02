@@ -366,13 +366,13 @@ def aggregate_displacement_sweep(
     sweep_dir, output_name="master_displacement_database.parquet"
 ):
     """
-    Concatenates individual run-level Parquet files into a master research database.
-    Assumes each run directory contains a 'displacement_log.parquet' and 'run_config.json'.
+    Concatenates individual run-level displacement Parquets into a master database.
+    Optimized for memory efficiency by preserving categories and using downcast types.
     """
     sweep_path = Path(sweep_dir)
     all_dfs = []
 
-    # 1. Locate all config files to identify valid runs
+    # 1. Locate all config files
     config_files = list(sweep_path.rglob("run_config.json"))
     print(f"Found {len(config_files)} potential runs. Commencing aggregation...")
 
@@ -381,50 +381,53 @@ def aggregate_displacement_sweep(
         parquet_path = run_dir / "displacement_log.parquet"
 
         if not parquet_path.exists():
-            print(f"Skipping {run_dir.name}: No parquet log found.")
             continue
 
-        # 2. Load the metadata from config
-        with open(cfg_path, "r") as f:
-            cfg = json.load(f)
-
-        # Pulling the key variables for your thesis analysis
-        alpha = cfg["ht_config"].get("alpha")
-        sigma = cfg["ht_config"].get("g")
-        seed = cfg.get("seed", "unknown")
-
-        # 3. Load the run-level Parquet
-        # This is already structured with steps, layers, and displacements
+        # 2. Load the run-level Parquet
+        # Your saving func already injected alpha_init, sigma_init, and seed.
+        # We don't need to manually inject them from JSON anymore!
         run_df = pd.read_parquet(parquet_path)
-
-        # 4. Inject metadata for global identification
-        run_df["alpha"] = alpha
-        run_df["sigma"] = sigma
-        run_df["seed"] = seed
 
         all_dfs.append(run_df)
 
-    # 5. The "Big Bang" Concatenation
+    # 3. The "Big Bang" Concatenation
     if all_dfs:
+        print("Concatenating dataframes...")
+        # ignore_index is crucial for displacement logs
         master_df = pd.concat(all_dfs, ignore_index=True)
 
-        # Enforce strict numeric types for physics queries
-        master_df["alpha"] = pd.to_numeric(master_df["alpha"], errors="coerce")
-        master_df["sigma"] = pd.to_numeric(master_df["sigma"], errors="coerce")
+        # 4. Re-enforce Categorization
+        # When merging multiple dataframes, Pandas usually keeps the 'category' type,
+        # but it's safest to re-assert it to ensure the internal dictionary is global.
+        cat_cols = ["layer", "alpha_init", "sigma_init", "seed"]
+        for col in cat_cols:
+            if col in master_df.columns:
+                master_df[col] = master_df[col].astype("category")
 
-        # Save using ZSTD for better compression on these repetitive signals
+        # 5. Final Sort for Physics Analysis
+        # Sorting by alpha/sigma first makes plotting hyperparameter sweeps much faster
+        print("Sorting database...")
+        sort_order = ["alpha_init", "sigma_init", "seed", "layer", "time_lag", "step"]
+        # Only sort by columns that actually exist
+        available_sort = [c for c in sort_order if c in master_df.columns]
+        master_df = master_df.sort_values(by=available_sort)
+
+        # 6. Save with high compression
         master_df.to_parquet(
-            output_name, engine="pyarrow", compression="zstd", index=False
+            output_name,
+            engine="pyarrow",
+            compression="zstd",
+            index=False
         )
 
         print("--- SUCCESS ---")
         print(f"Master database saved to: {output_name}")
         print(f"Total Rows: {len(master_df):,}")
-        print(f"Columns tracked: {list(master_df.columns)}")
+        print(f"Memory Usage: {master_df.memory_usage(deep=True).sum() / 1024**2:.2f} MB")
 
         return master_df
     else:
-        print("Error: No dataframes found to combine.")
+        print("Error: No displacement_log.parquet files found.")
         return None
 
 

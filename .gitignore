@@ -253,3 +253,4 @@ tamsd_results.json
 *.pbs
 *.sh
 **/checkpoints
+*.parquet
