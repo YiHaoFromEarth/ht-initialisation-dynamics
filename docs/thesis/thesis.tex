@@ -4,26 +4,30 @@
 \usepackage{graphicx}
 \usepackage{caption}
 \usepackage{subcaption}
-\usepackage[a4paper,width=150mm,top=25mm,bottom=25mm,bindingoffset=6mm]{geometry}
+\usepackage[a4paper,width=160mm,top=20mm,bottom=20mm]{geometry}
 \usepackage{fancyhdr}
 \usepackage{parskip}
 \usepackage{hyperref}
 \usepackage{amsmath}
 \usepackage[acronym]{glossaries}
 \usepackage{lipsum} %DUMMY TEXT
+\usepackage{microtype}
+\usepackage[utf8]{inputenc}
+\usepackage{titlesec}
+\usepackage{float}
 \usepackage[style=nature, backend=biber]{biblatex}
 
 % CONFIGS
 \pagestyle{fancy}
 \setlength{\headheight}{14.49998pt}
 \fancyhead{}
-\fancyhead[RO,LE]{Heavy-Tailed Initialisation in the Lazy-to-Rich Transition of Neural Dynamics}
+\fancyhead[RO,LE]{Training Dynamics of Heavy-Tailed Initialisation in Deep Neural Networks}
 \fancyfoot{}
 \fancyfoot[LO,CE]{\ifnum\value{chapter}=0\else \leftmark \fi}
 \fancyfoot[LE,RO]{\thepage}
 \hypersetup{
     pdfauthor = {Yi Hao},
-    pdftitle = {Heavy-Tailed Initialisation in the Lazy-to-Rich Transition of Neural Dynamics},
+    pdftitle = {Training Dynamics of Heavy-Tailed Initialisation in Deep Neural Networks},
     colorlinks,
     linkcolor={blue},
     citecolor={blue},
@@ -46,6 +50,17 @@
 % BIB SETUP
 \addbibresource{references.bib}
 
+% TITLE FORMATING
+% Change [display] to [block] to put everything on one line
+\titleformat{\chapter}[block]
+{\normalfont\huge\bfseries} % Style of the entire line
+{\chaptertitlename\ \thechapter:\quad} % Label (e.g., Chapter 1:)
+{0pt} % Space between label and title (0pt because \quad handles it)
+{\huge} % Style for the title text
+
+% Adjust the spacing to move it up
+\titlespacing*{\chapter}{0pt}{-10pt}{20pt}
+
 
 % <><><><><><><><><><><><><><><><><><><><><><>
 \begin{document}
@@ -60,7 +75,7 @@
         \vspace*{1cm}
         
         \Huge
-        \textbf{Heavy-Tailed Initialisation in the Lazy-to-Rich Transition of Neural Dynamics}
+        \textbf{Training Dynamics of Heavy-Tailed Initialisation in Deep Neural Networks}
         
         \vspace{1.5cm}
         
@@ -74,7 +89,7 @@
         
         \vspace{0.8cm}
         
-        \includegraphics[width=0.4\textwidth]{usyd_logo.jpg}
+        \includegraphics[width=0.4\textwidth]{usyd_logo.png}
         
         \large
         School of Physics\\
@@ -99,7 +114,7 @@
 \clearpage
 \addcontentsline{toc}{chapter}{Abstract} % Add to TOC before the chapter starts
 \chapter*{Abstract}
-\lipsum[1]
+\lipsum[1-2]
 
 % ---------------------------------------------------------
 % PAGE 3: STATEMENTS & ACKNOWLEDGEMENTS
@@ -118,10 +133,10 @@ I certify that this thesis contains work carried out by myself except where othe
 \noindent Signed: \rule{4cm}{0.4pt} \hfill Date: \today
 
 \section*{Acknowledgements}
-\lipsum[2]
+\lipsum[3]
 
 \section*{Statement of Contribution}
-\lipsum[3]
+\lipsum[4-5]
 
 % ---------------------------------------------------------
 % PAGE 4: TABLE OF CONTENTS
@@ -136,19 +151,170 @@ I certify that this thesis contains work carried out by myself except where othe
 % MAIN CONTENT (Page 5+)
 % ---------------------------------------------------------
 
-\chapter{Introduction}
+\chapter*{Introduction}
 \label{chap:intro}
-\lipsum[4-6]
+From the Ancient Greek myth of Talos to the 20th century works of Isaac Asimov, humanity has long dreamed of creating machines that can reason like man. In the contemporary era, this has matured into the field of artificial intelligence, where electrons moving on rails of silicon perform tasks from image classification to playing chess. At the cornerstone of modern artificial intelligence is deep learning, where deep neural networks (DNNs) are trained on large quantities of data. At its core, a neural network is a universal function approximation, that when trained on sufficient data, learns a representation mapping from input to output. For this reason, deep learning has made remarkable progress in the past decade, with landmark successes from natural language processing, game playing, biology to robotics. Nowadays, chat-bots like ChatGPT and Claude are used by hundreds of millions people across the globe, powered by Large Language Models (LLMs), a type of neural network. However, a satisfactory theory of deep learning is still lacking. One of the most fundamental open problems is: What is the optimal training procedure? Current state-of-the-art methods are largely based on heuristics and experimental observations, with little theoretical grounding. A theory that can explain the effectiveness of present methods would inform the direction an design of future architectures and optimisation algorithms, making such a "theory of everything" highly sought after.
+
+While various frameworks have been proposed to understand the behaviour of neural networks, one particularly popular choice is Mean Field Theory (MFT). The core concept of MFT is that one can study the behaviour of high-dimensional stochastic models by using a simpler model that approximates the original by averaging over degrees of freedom. The main idea is to replace all interactions  with an average or effective interaction, sometimes called a mean field. In deep neural networks, this is done by invoking the Central Limit Theorem, approximating the network parameters for each layer as a Gaussian distribution that can be characterised by its moments. In practice, due to initialisation schemes and normalisation, we are primarily concerned about the variance $\sigma^2$ which models how information propagates through a network. By studying how variance evolves, various works have established regions of vanishing and exploding signal propagation, corresponding to the classical phases of order and chaos respectively. These important insights have informed initialisation strategies which lead to the faster and more successful training of deep neural networks. However, these assumptions come with limitations.
+
+A majority of theoretical studies have generally assumed Gaussian statistics and initialisations in describing neural networks. However, it has been empirically demonstrated that deep networks in practice evolve into heavy-tailed distributions regardless of architecture. Moreover, the generalisation abilities of DNNs have been closely linked with the properties of heavy-tailed distributions. These observations raise fundamental questions of whether and how heavy-tailed distributions endows DNNs with crucial dynamical and computational properties. It also demonstrates the conventional MFT, which relies on Gaussian statistics, is insufficient to describe the nature of these networks. 
+
+Instead, recent works have introduced the use of $\alpha$-stable distributions, a generalisation of the Gaussian distribution, to model neural networks. While an $\alpha$-stable distribution is described by four parameters, most attention is given to the stability parameter $\alpha$, and scale parameter $\sigma$. These two describe the tail behaviour and spread of the distribution respectively. While conventional MFT is unable to describe a heavy-tailed distribution using Gaussian statistics, $\alpha$-stable distributions can, called Lévy mean-field theory. The traditional recurrence relation that uses $\sigma^2$, which becomes undefined for heavy-tailed distributions, is replaced by the scale parameter $\sigma$ instead. This allows us to model and predict the stability and signal propagation for heavy-tailed neural networks. This theory has predicted that heavy-tailed networks display the property of extended criticality, being able to generalise successfully in a wide area of parameter space. Such predictions have been empirically validated in real networks. In contrast, Gaussian models operate within a thin region, an "edge-of-chaos" line that requires substantial fine-tuning. Structural analysis of these networks reveal that the eigenvectors of the layerwise Jacobians are spatially multifractal, offering a mixture of localised and delocalised properties. This extended criticality allows the network to balance the contraction and expansion of internal representations, leading to significantly faster training and superior generalisation without needing precise parameter tuning. However, the non-equilibrium dynamics that occur within this regime during training are still largely unknown.
+
+In this thesis...
 
 \chapter{Literature Review}
 \label{chap:review}
-\subsection{RMT as a Zero-Information Hypothesis}
-The high levels of success deep neural networks have displayed in a variety of fields have led to much interest in understanding how they store the information required for a particular task. In particular, methods from Random Matrix Theory (RMT) are highly useful for this, serving as a null hypothesis. If the weight matrix of a neural network follows RMT predictions, it suggests that they are random and do not contain specific information.
+\section{Deep Learning Fundamentals}
+\subsection{Neural Networks}
+In essence, a neural network is a computational model inspired by the structure and functions of biological neural networks in the brain. They consist of many units called \textit{neurons}, each one connected to other neurons by \textit{edges}. Each neuron receives signals from connected neurons, then processes them and sends a signal to other connected neurons. The signal is a real number; specifically, a neuron computes a weighted sum of its inputs plus a \textit{bias} term, which is then passed through a non-linear \textit{activation function} to determine the output. The strength of the signal at each connection is determined by a \textit{weight}, which adjusts during the training process. Normally, neurons are organised into layers. Signals travel from the first layer (\textit{the input layer}) to the last layer (\textit{the output layer}), passing through intermediate layers (\textit{hidden layers}) along the way. A network is typically called a deep neural network if it has multiple hidden layers. This is illustrated below in Figure \ref{fig:nn_diagram}.
 
-However, not all methods from RMT are equally suitable for testing the zero-information hypothesis. For example, the distribution of singular values is highly sensitive to the specific type of random matrix. In contrast the nearest-neighbour spacing distribution and number variance are universal properties of random matrices, being invariant to dimension or initialisation. 
+\begin{figure}[htbp]
+	\centering
+	\includegraphics[width=0.8\textwidth]{nn_diagram.pdf}
+	\caption{A schematic of a deep neural network with an input layer, two hidden layers, and an output layer, depicting the neurons and edges.}
+	\label{fig:nn_diagram}
+\end{figure}
 
-In principle, it is possible for information to be stored in weights that follow RMT predictions, for example a teacher-student setup with a random teacher. However, RMT analysis is particularly useful for image classification tasks on datasets like MNIST or CIFAR, where rules exist that can be encoded in a low-rank matrix.
+The fundamental power of neural networks is built on the \textit{Universal Approximation Theorem} (UAT), which states that neural networks with a certain structure can, in principle, approximate any continuous function to any desired degree of accuracy. This theorem provides a mathematical justification for using DNNs, as a sufficiently large or deep network can model any abstract relationship found in real-world data. The UAT is however, a non-constructive existence theorem, which only guarantees that such a network is possible, not how feasible it is. It does not provide a method for finding the network's parameters, nor does it specify exactly how large the network must be for a given function. Finding a suitable network remains a practical challenge that is typically addressed with various optimisation algorithms like backpropagation and gradient descent. Consequently, the study of deep learning shifts from a question of representational existence to one of dynamical navigation: how a network's state evolves through a high-dimensional parameter space to find these elusive solutions.
+\subsection{Training and Evaluation}
+\subsubsection{The Goal of Training}
+The fundamental goal of training a neural network is improve its mapping of the input to the desired output, by adjusting the weights of the model. This can be understood as the network being an approximator of a function that maps an input $x_i$ to the output $y_i$. We denote the function represented by the network as $F$, where $z_i = F(x_i;\textbf{w})$ is the prediction corresponding to the input $x_i$ for a given set of weights $\textbf{w}$ that parameterises the network. The process of training is effectively described as minimising the error between the set of predictions $\{z_i \mid i = 1, 2, \ldots, N\}$ and the set of true values  $\{y_i \mid i = 1, 2, \ldots, N\}$. To quantify this error, a \textit{loss function} is used,
 
+\begin{equation}
+	L(\textbf{w}) = \frac{1}{N} \sum^N_{i=1} d(y_i, z_i)
+	\label{eq:loss_function}
+\end{equation}
+
+where $d(y_i, z_i)$ is a representation of the error between prediction $z_i$ and true value $y_i$. Various types of loss functions are used in the field of deep learning, from Mean Squared Error used for regression tasks, to Cross-Entropy Loss for classification tasks. In any case, any well performing network should minimise this value, and the goal of training is adjusting the parameters $\textbf{w}$ to accomplish this.
+\subsubsection{The Learning Process}
+In practice, a model is trained by learning from an example set of representative data, called the \textit{training set}. We denote this as $\{x_i, y_i \mid i = 1, 2, \ldots, N\}$, where $x_i$ is the data point and $y_i$ is the ground truth label. This data is then sent through the network in what is known as a \textit{forward pass}. The output of the model $z_i$ is then used as an input into Eq. \ref{eq:loss_function} alongside the associated $y_i$, returning a loss. Now, the core question is: how do we adjust the weights $\textbf{w}$ to decrease the loss? This is accomplished by the process of \textit{backpropagation}, an efficient application of the multivariate chain rule to neural networks. It efficiently computes the gradient of the loss with respect to the network weights, by propagating derivatives backward (\textit{backward pass}), one layer at a time. By assigning a gradient to each weight within a network, which points in the direction of higher loss, we can move in opposite direction to decrease our loss. In principle, this can be accomplished through an algorithm called gradient descent (GD) that prescribes for the evolution of network weights,
+
+\begin{equation}
+	\textbf{w}_{t+1} = \textbf{w}_t - \eta \nabla L(\textbf{w}_t)
+	\label{eq:gd}
+\end{equation}
+
+where $\textbf{w}_t$ are the weights at step $t$, $\nabla L$ is the gradient of the loss and $\eta$ is the \textit{learning rate}, a \textit{hyperparameter} (a parameter set before training) governing step sizes. In practice however, gradient descent is computationally expensive, requiring the forward pass of the whole training set during each iteration, and prone to poor performance. Therefore, an alternative algorithm to GD called stochastic gradient descent (SGD) is used instead:
+
+\begin{equation}
+	\textbf{w}_{t+1} = \textbf{w}_t - \eta \nabla \tilde{L}_t(\textbf{w}_t)
+	\label{eq:sgd}
+\end{equation}
+
+Here, the stochastic gradient $\nabla \tilde{L}_t$ is an estimate of the true gradient $\nabla L$ calculated using a \textit{mini-batch}. The mini-batch is a random subset $\Omega_t \subset \{x_i, y_i \mid i = 1, 2, \ldots, N\}$ of the training set with the hyperparameter \textit{batch size} $S$. Training is effectively an iterative loop of choosing a mini-batch, doing a forward pass, calculating the loss, doing backpropagation, and moving the weights opposite to the gradient. From a physical perspective, this stochasticity introduces a thermal-like fluctuation into the weight evolution, effectively turning the optimiser into a particle undergoing a random walk driven by the local landscape geometry. The training of a network is typically terminated once the performance converges to a sufficient value, or a set number of \textit{epochs}, where one epoch is defined to be $\lceil \frac{N}{S} \rceil$ iterations.
+\subsubsection{Evaluation and Generalisation}
+However, a crucial flaw in the training process is \textit{overfitting}, where the network adapts so well to the training set that it starts to struggle on previously unseen data, making it unsuitable for real-world use. Therefore, a separate pool of data points is reserved as a \textit{test set}, denoted as $\{\chi_i, v_i \mid 1, 2, \ldots, M\}$. The test set does not contribute to the evolution of the weights during training. Instead, it is used to evaluate generalisation, how well the network performs
+on previously unseen data. This makes it the primary diagnostic to prevent overfitting. The generalisation is measured by the testing accuracy, which is defined as the percentage of predictions $F(\chi_i;\textbf{w})$ that match the true value $v_i$ for a set of weights $\textbf{w}$. In almost all applications of neural networks, testing accuracy is valued more than training accuracy or loss. This preference for generalisation is often linked to the "flatness" of the local minima reached by the optimiser, a property we will explore through the lens of multi-fractal landscape structure in later sections.
+\subsection{The Geometry of Learning}
+\subsubsection{The Loss Landscape}
+A popular and powerful method to understand the learning process of a neural network, is to view it as a particle navigating through a complex, high-dimensional \textit{loss landscape}. The loss landscape $L(\textbf{w})$ is a mathematical surface mapping a neural network's parameters to its loss value. Every possible permutation of the weights $\textbf{w}$ maps to a point on the surface, and the height of that point represents the loss. Therefore in principle, the training process thus involves finding the global minimum (the lowest point) of the loss. In practice however, for deep neural networks, the loss landscape is a highly non-convex, high-dimensional surface. It is characterised by chaotic terrain containing numerous local minima, sharp valleys, and wide, flat regions. A \textit{local minima} is a point on the loss landscape where the loss is lower than its immediate neighbours, meaning the gradient is zero. This leads to stalled learning even when performance is poor. Of particular importance are \textit{saddle points}, points on the landscape where the gradients in orthogonal directions are all zero, but which is not a local extremum of the function. They are a primary driver of complex learning dynamics and phase transitions in deep learning. Overall, the learning process is highly non-trivial, and in practice, finding a sufficient local minima is the goal of optimisation.
+
+\begin{figure}[htbp]
+	\centering
+	\vspace*{1em}
+	\includegraphics[width=0.7\textwidth]{loss_landscape.png}
+	\caption{A visualisation of the loss landscape for VGG-56. Regions of high and low loss are shaded in red and blue respectively. Note the rugged, non-convex nature of the landscape.}
+	\label{fig:loss_landscape}
+\end{figure}
+
+\subsubsection{Hessians and Jacobians}
+A powerful mathematical tool used to study and characterise the loss landscape is the \textit{Hessian matrix} $\textbf{H} = \nabla^2 L(\textbf{w})$, defined as the square matrix of second-order partial derivatives of a scalar-valued function, in this case the loss function. It describes the local curvature of the loss landscape, and is used to characterise many features like local minima and saddle points. Specifically, the eigenvalues $\lambda_i$ of the Hessian reveal the "steepness" of the landscape in the vicinity of a critical point. The maximum eigenvalue $\lambda_{max}$ is a common proxy for the \textit{sharpness} of a minimum, while the full singular value spectrum provides insight into how the network is compressing information. The \textit{Flat Minima Conjecture} posits that flatter regions with lower curvature and smaller maximum eigenvalues are strongly correlated with superior generalisation and stability. In the context of this thesis, we track these spectral observables to monitor the structural re-organisation of weights during the learning process.
+
+While the Hessian describes the overall curvature of the loss, the \textit{Jacobian matrix} $\textbf{J}^l=\frac{\partial\textbf{x}^l}{\partial\textbf{x}^{l-1}}$ characterises the internal propagation of signals between layers. The total sensitivity of the network's output to its input is determined by the product of these layer-wise operators. In conventional Gaussian networks, these products can lead to the vanishing or exploding gradient problem if not carefully fine-tuned. Therefore, we utilise the layer-wise Jacobian as a primary diagnostic tool to monitor the internal "health" of signal propagation across the network's depth, looking for structural signatures that might indicate a balance between expansion and contraction.
+
+\subsubsection{Optimisation Heuristics and the Generalisation Gap}
+To navigate these high-dimensional landscapes efficiently, various heuristics and regularisation techniques are typically employed. \textit{L2 regularisation}, or weight decay, adds a penalty term to the loss function to prevent the weights w from growing excessively, effectively smoothing the landscape to prevent overfitting. Furthermore, while \textit{vanilla SGD} uses a fixed learning rate $\eta$, adaptive optimisers such as \textit{Adam} adjust the step size for each parameter individually based on the history of previous gradients.
+
+In the experimental setup of this thesis, we purposefully omit these advanced heuristics, utilising vanilla SGD with no weight decay. This minimalist protocol ensures that any observed rich learning behaviour or structural evolution is an intrinsic result of the heavy-tailed initialisation rather than an artifact of the optimisation algorithm. The success of the model is ultimately measured by the \textit{generalisation gap}: the difference between the model's performance on the training set versus the \textit{test set} of previously unseen data. A smaller gap indicates that the network has truly learned abstract features rather than simply memorising the training noise.
+\section{Dynamical and Spectral Theories of Deep Learning}
+\subsection{Mean Field Theory}
+\textit{Mean Field Theory} (MFT) is a core mathematical tool from physics and probability theory, used to study the behaviour of high-dimensional stochastic models. The core concept of MFT is to replace all interactions to any one body with an average or effective interaction, sometimes called a \textit{mean field}. By reducing a complex system to a simpler model that approximates the original via the mean field, it reduces any many-body problem into an effective one-body problem. The increased ease of study means that insight into the behaviour of the system can be obtained at a lower computational cost. 
+
+This is highly powerful for the field of deep learning, where even the simplest models have millions of interacting parameters. We treat the weights as independent and identically distributed (i.e.i.d.) Gaussian variables. This allows us to invoke the \textit{Central Limit Theorem} (CLT), thereby approximating the behaviour of any layer as a \textit{Gaussian distribution}. A Gaussian can be fully described by just its mean $\mu$ and variance $\sigma^2$, greatly simplifying the many neurons and edges within a layer. In practice, with most initialisation schemes setting $\mu = 0$ to avoid shifting the signal, we are primarily concerned with the variance $\sigma^2$. By studying how $\sigma^2$ varies across a network, we can predict the growth or shrinkage of a signal as it passes through the model. 
+
+This is formalised via the \textit{iterative map}, which describes the variance of the \textit{pre-activations} at the \textit{Mean Field Limit} ($N \rightarrow \infty$):
+
+\begin{equation}
+	q^l = \sigma_w^2 \int_{-\infty}^{\infty} \frac{dz}{\sqrt{2\pi}} e^{-\frac{z^2}{2}} \phi\left(\sqrt{q^{l-1}}z\right)^2 + \sigma_b^2
+	\label{eq:iterative_map}
+\end{equation}
+
+In Eq. \ref{eq:iterative_map}, $q^l$ denotes the variance (or second moment) of the neural inputs at layer $l$. The parameters $\sigma_w^2$ and $\sigma_b^2$ represent the weight and bias variances, respectively, which dictate the coupling strength between layers. In the mean field limit ($N \rightarrow \infty$), this map converges to a deterministic recursion relation that characterises the fluctuations of the neural input distribution throughout the depth of the network. 
+
+The primary utility of this iterative approach is the identification of the fixed point $q^*$, where $q^l = q^{l-1}$ for large $l$. By linearising the network around this stationary state, one can derive the input-output Jacobian, which serves as a diagnostic for signal stability. This framework allows researchers to determine whether a network will suffer from the vanishing or exploding gradient problem before training ever begins, providing a principled guide for hyperparameter selection.
+\subsection{Deep Information Propagation}
+The study of how signals evolve through the layers of a deep network is known as \textit{Deep Information Propagation}. Using the MFT framework, the dynamical behaviour of a DNN can be categorised into three distinct phases based on the weight variance $\sigma_w^2$ and the resulting spectral radius of the layer-wise Jacobian.
+
+\begin{enumerate}
+	\item \textbf{The Ordered Phase}: Also referred to as the silent regime, this occurs when $\sigma_w^2$ is low. In this phase, signal correlations increase and the magnitude of activations exponentially decays (vanishes) as they propagate deeper into the network. Geometrically, this corresponds to a uniform contraction of the internal neural representations.
+	
+	\item \textbf{The Chaotic Phase}: This occurs when $\sigma_w^2$ exceeds a critical threshold. Here, small perturbations in the input are exponentially amplified (explode), leading to a chaotic expansion of representations where the signal eventually becomes indistinguishable from noise.
+	
+	\item \textbf{The Edge of Chaos}: This is the critical transition line between the ordered and chaotic regimes. At this point, information can propagate to theoretically infinite depths without vanishing or exploding. This phase is characterised by a balance of contraction and expansion, enabling the network to learn complex, abstract mappings.
+\end{enumerate}
+
+Quantitatively, for Gaussian random networks, the transition to chaos is identified by the maximum singular value (spectral radius) of the layer-wise Jacobian crossing unity. Specifically, in the Gaussian limit ($\alpha=2$), the edge-of-chaos transition is predicted to occur at a single point or thin line in the parameter space, such as $D_w = 1$ for networks with zero bias. 
+
+However, this classical Gaussian framework possesses a significant limitation: the "fine-tuning problem". Because the critical regime in Gaussian models is restricted to a thin boundary, any slight deviation in parameters can push the network into a non-trainable state. Furthermore, Gaussian initialisations result in delocalised eigenvectors that spread evenly across neural sites, lacking the mixture of localised and delocalised properties seen in more complex biological systems. This suggests that while Gaussian MFT provides a clean baseline, it may be insufficient for describing the robust, self-organising criticality observed in real-world deep learning architectures.
+\subsection{The Neural Tangent Kernel and Learning Regimes}
+While Mean Field Theory provides a static snapshot of signal propagation, the \textit{Neural Tangent Kernel} (NTK) framework describes the continuous-time evolution of the network during training. In the infinite-width limit ($N \rightarrow \infty$), the dynamics of a deep neural network undergo a remarkable simplification: the weights move only infinitesimally from their initial values, yet the network's output evolves according to a linear model. This regime, often termed \textit{lazy learning}, is exceptionally powerful as it implies that the complex, non-linear training trajectory of a DNN can be described by a static, constant kernel. Consequently, this allows for the use of kernel methods and closed-form algebra to predict training outcomes and generalisation performance without the computational requirement of executing gradient descent.
+
+The core of this framework is the NTK matrix, $\Theta^{(L)}$, which is defined by the inner product of the network gradients with respect to the weights:
+
+\begin{equation}
+	\Theta^{(L)}(\mathbf{x}, \mathbf{x}') = \sum_{p=1}^P \frac{\partial F(\mathbf{x}; \textbf{w})}{\partial w_p} \frac{\partial F(\mathbf{x}'; \textbf{w})}{\partial w_p}
+	\label{eq:ntk_kernel}
+\end{equation}
+
+In Eq. \ref{eq:ntk_kernel}, $F$ represents the network function and $P$ is the total number of parameters. Under the assumption of infinite width, this kernel remains frozen at its initial value throughout the entire training process. This leads to a simple linear differential equation governing the evolution of the network's predictions over time $t$:
+
+\begin{equation}
+	\frac{d F(\mathbf{x}, t)}{d t} = -\eta \Theta^{(L)}(\mathbf{x}, \mathbf{x}_j) \nabla_{F} L
+	\label{eq:ntk_dynamics}
+\end{equation}
+
+Eq. \ref{eq:ntk_dynamics} suggests that the learning process is equivalent to a kernel regression where the features are fixed at the start of training. This provides a precise signal-to-noise threshold for identifying learning boundaries. However, the NTK limit represents a "lazy" regime where the network fails to perform true \textit{feature learning}, as the underlying representations do not adapt to the structure of the data. 
+
+In contrast, most state-of-the-art deep networks operate in the \textit{rich learning} (or feature learning) regime. In this state, the weights undergo significant structural re-organisation, allowing the network to actively learn and specialise its internal representations. Characterising the transition between these two regimes is a central challenge in modern theory. This study utilises these frameworks to define learning boundaries and identify the mechanisms, such as spatial decoupling, that allow different layers to exhibit either lazy or rich learning characteristics during the training trajectory.
+\subsection{The Edge of Stability}
+The interaction between the learning rate $\eta$ and the local geometry of the loss landscape defines the stability of the optimisation trajectory. Central to this interaction is the concept of \textit{sharpness}, a metric derived from the Hessian matrix $\textbf{H}$. Quantitatively, sharpness is defined by the maximum eigenvalue of the Hessian, $\lambda_{max}$, which represents the direction of steepest curvature in the high-dimensional parameter space. Low values of $\lambda_{max}$ correspond to flatter, more resilient regions of the landscape, while high values indicate sharp, narrow valleys where the gradient changes rapidly over small distances.
+
+Classical optimization theory, largely built upon the study of quadratic and convex objectives, prescribes a strict upper bound on the learning rate to ensure convergence. For a function with local smoothness $\lambda_{max}$, Gradient Descent is expected to converge only when the learning rate satisfies $\eta < 2/\lambda_{max}$. In this classical regime, exceeding this threshold is predicted to result in a catastrophic divergence of the loss, as the optimizer overshoots the minimum and enters an unstable, exploding trajectory.
+
+However, empirical observations in deep learning have revealed a phenomenon that defies this classical prescription, known as the \textit{Edge of Stability} (EoS). During the training of non-convex deep networks, it is observed that the landscape undergoes "progressive sharpening," where $\lambda_{max}$ increases until it reaches the critical threshold of $2/\eta$. At this boundary, the network does not diverge; instead, $\lambda_{max}$ begins to hover just above the $2/\eta$ limit. In this EoS regime, the system exhibits local instability, characterised by short-term oscillations and increases in loss, yet manages to maintain long-term convergence and self-stabilisation.
+
+This dynamical behaviour is hypothesised to be a primary mechanism by which neural networks navigate toward flatter minima. By operating at the edge of stability, the optimiser effectively "bounces" out of sharper, sub-optimal regions until it encounters a basin wide enough to accommodate the learning rate without local divergence. In the context of this thesis, we monitor the evolution of spectral observables, such as the spectral norm and the stable rank, to identify how these stability thresholds interact with the non-equilibrium dynamics induced by heavy-tailed initialisation.
+\subsection{Transition to Multifractality}
+The classical frameworks of Gaussian Mean Field Theory and convex optimisation provide a mathematically convenient baseline, yet they appear increasingly insufficient to describe the reality of deep learning dynamics. Empirical observations of phenomena such as the \textit{Edge of Stability}, "grokking", and particularly the aging \textit{anomalous diffusion} of SGD suggests that the loss landscape is far more complex than the smooth, well-behaved surfaces assumed by established theory. Furthermore, the discovery of chaotic dynamics in deterministic gradient descent implies that stochastic-like behaviour can emerge purely from interactions with a multi-scale landscape structure. These anomalies indicate that the origins of generalisation may be fundamentally rooted in the geometric structure of the loss landscape itself.
+
+To model this heterogeneous complexity, we look to the field of fractal geometry. A \textit{fractal} is a mathematical object that exhibits scale-invariance, meaning its structure remains similar when viewed at different magnifications. While monofractals are characterised by a single, global scaling exponent, real-world disordered media often require an extended spectrum of exponents, a property known as \textit{multifractality}. In the context of a loss landscape, multifractality implies that the roughness of the surface varies heterogeneously across the parameter space.
+
+Quantitatively, this roughness can be described using the \textit{pointwise Hölder exponent}, $H(\mathbf{x})$, which serves as a local measure of regularity. For a multifractional Brownian surface (MBS), the local fractal dimension $D$ is related to this exponent via $D = d + 1 - H(\mathbf{x})$, where $d$ is the topological dimension. Landscapes with low $H(\mathbf{x})$ values are characterised by high roughness and anti-persistent increments, whereas high $H(\mathbf{x})$ values represent smoother regions with persistent correlations. 
+
+The current lack of a theory that accounts for these empirical observations while explaining generalisation remains a significant gap in the literature. Traditional Langevin models are contingent upon external stochasticity and fail to predict the time-dependent, non-equilibrium dynamics observed in actual networks. There is a clear demand for a new, landscape-focused theoretical framework that can reconcile these complex dynamical signatures. By shifting the focus from Gaussian statistics to heavy-tailed distributions and multifractal geometries, we can begin to uncover the mechanisms that enable the robust computational performance of deep architectures.
+\section{Lévy Mean Field Theory}
+While Gaussian Mean Field Theory provides a rigorous baseline for signal propagation, its reliance on the Central Limit Theorem (CLT) restricts its applicability to networks with finite-variance weight distributions. However, empirical evidence suggests that deep networks in practice often exhibit heavy-tailed coupling weights that are better described by $\alpha$-stable distributions. To account for these statistics, recent work has developed \textit{Lévy Mean Field Theory}, which generalises the Gaussian framework to the regime of infinite variance ($\alpha < 2$).
+
+\subsection{Stable Distributions and the Scale Parameter}
+In this framework, the weight entries $W_{ij}^l$ are sampled from a symmetric $\alpha$-stable distribution $S_\alpha(\sigma)$, where $\alpha \in (1, 2]$ dictates the thickness of the tails. In the Gaussian limit ($\alpha = 2$), the variance $\sigma^2$ is well-defined and governs the signal evolution. However, for $\alpha < 2$, the variance becomes infinite, rendering the traditional iterative map (Eq. \ref{eq:iterative_map}) divergent. Lévy Mean Field Theory resolves this by parameterising the distribution of neural inputs $h_i^l$ using the \textit{scale parameter} $q^l$, leading to a new recursion relation:
+
+\begin{equation}
+	q^l = D_w \int |\phi(z)|^\alpha p_{S_\alpha((q^{l-1}/2)^{1/\alpha})}(z) dz + D_b
+	\label{eq:levy_map}
+\end{equation}
+
+In Eq. \ref{eq:levy_map}, $D_w$ represents the coupling strength, acting as the functional successor to Gaussian variance. This map allows for the characterisation of fluctuations in heavy-tailed networks, providing a theoretical tool to predict signal stability in regimes where standard MFT fails.
+
+\subsection{The Emergence of Extended Criticality}
+The most striking prediction of Lévy Mean Field Theory is the existence of an \textit{extended critical regime}. Unlike Gaussian networks, which possess a singular "edge-of-chaos" line requiring precise fine-tuning, heavy-tailed networks $(\alpha < 2)$ exhibit a broad region of parameter space where information can propagate to theoretically infinite depths. This extended criticality is a robust feature of heavy-tailed architectures, allowing the network to maintain a balance between representation expansion and contraction without sensitive parameter selection.
+
+Spectral analysis of the layer-wise Jacobians in this regime reveals that the eigenvectors are \textit{spatially multifractal}. This implies a mixture of localised and delocalised properties, providing a microscopic mechanism for the network to separate crucial features from random noise. This multifractality allows for a "hierarchical division of labour" within the network, where different layers can perform distinct computational tasks based on their local transport physics.
+
+\subsection{The Gap: Non-Equilibrium Training Dynamics}
+Although Qu et al. (2022) successfully established the stationary properties of the extended critical regime, the \textit{non-equilibrium dynamics} occurring during the actual training process remain largely unexplored. While the theory predicts stable signal propagation at initialisation, it does not account for how the weight manifold evolves, or how specific layers escape local minima through discrete \textit{Lévy flights} during the learning trajectory. 
+
+The primary aim of this thesis is to fill this gap by empirically characterising the transport kinetics of heavy-tailed neural networks. By monitoring layer-wise displacement tracking and Time-Averaged Mean Squared Displacement (TAMSD), we seek to identify the dynamical signatures—such as ballistic transport and spatial decoupling—that enable the superior performance and stability of these architectures in traditionally "silent" ordered regimes.
 \chapter{Methodology}
 \label{chap:method}
 
