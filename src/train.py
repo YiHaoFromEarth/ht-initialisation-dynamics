@@ -33,6 +33,7 @@ def train_model(
     seed,
     output_root,
     log_freq=10,
+    track_model=False
 ):
     """
     Foundational orchestrator to initialize, train, and log an ML experiment.
@@ -135,8 +136,11 @@ def train_model(
         criterion = nn.CrossEntropyLoss()
         history = []
 
-        step_tamsd_tracker = ModelTracker(model, lags=[1, 2, 4, 8, 16, 32])
-        epoch_tamsd_tracker = ModelTracker(model, lags=[1, 2, 4, 8, 16, 32, 64, 128])
+        step_tamsd_tracker = None
+        epoch_tamsd_tracker = None
+        if track_model:
+            step_tamsd_tracker = ModelTracker(model, lags=[1, 2, 4, 8, 16, 32])
+            epoch_tamsd_tracker = ModelTracker(model, lags=[1, 2, 4, 8, 16, 32, 64, 128])
 
         # --- Epoch 0: Initial Evaluation ---
         train_m = evaluate_model(model, loaders["train"], device, criterion)
@@ -188,14 +192,16 @@ def train_model(
 
                 optimizer.step()
 
-                step_tamsd_tracker.update(model, flat_grads=current_grads)
+                if step_tamsd_tracker is not None:
+                    step_tamsd_tracker.update(model, flat_grads=current_grads)
 
                 train_loss += loss.item()
                 _, predicted = outputs.max(1)
                 train_total += labels.size(0)
                 train_correct += predicted.eq(labels).sum().item()
 
-            epoch_tamsd_tracker.update(model)
+            if epoch_tamsd_tracker is not None:
+                epoch_tamsd_tracker.update(model)
             current_train_acc = train_correct / train_total
             current_train_loss = train_loss / len(loaders["train"])
 
@@ -268,64 +274,65 @@ def train_model(
         with open(run_dir / "run_config.json", "w") as f:
             json.dump(config_dump, f, indent=4)
 
-        # Extract metadata for the DataFrame
-        a_val = ht_config.get("alpha", "N/A")
-        s_val = ht_config.get("g", "N/A")
+        if step_tamsd_tracker is not None and epoch_tamsd_tracker is not None:
+            # Extract metadata for the DataFrame
+            a_val = ht_config.get("alpha", "N/A")
+            s_val = ht_config.get("g", "N/A")
 
-        # --- 1. Get DataFrames ---
-        df_step = step_tamsd_tracker.to_dataframe(a_val, s_val, seed, scale=1)
-        df_epoch = epoch_tamsd_tracker.to_dataframe(
-            a_val, s_val, seed, scale=60000 // 1024
-        )
-        # 1. Combine
-        master_physics_df = pd.concat([df_step, df_epoch], ignore_index=True)
-
-        # 2. Forced Numeric Downcasting (Parameters & Seed)
-        # We do this FIRST so the category labels themselves are small types
-        master_physics_df["alpha_init"] = master_physics_df["alpha_init"].astype(
-            "float32"
-        )
-        master_physics_df["sigma_init"] = master_physics_df["sigma_init"].astype(
-            "float32"
-        )
-        master_physics_df["seed"] = master_physics_df["seed"].astype("int32")
-
-        # 3. Downcast Metrics (The bulk of the data)
-        float_cols = [
-            "net_drift",
-            "abs_mean_dist",
-            "rms_dist",
-            "l_inf_dist",
-            "cos_dist",
-            "snr",
-            "grad_weight_alignment",
-        ]
-        master_physics_df[float_cols] = master_physics_df[float_cols].astype("float32")
-
-        # 4. Downcast Lags and Steps (Integers)
-        int_cols = ["time_lag", "step"]
-        for col in int_cols:
-            master_physics_df[col] = pd.to_numeric(
-                master_physics_df[col], downcast="integer"
+            # --- 1. Get DataFrames ---
+            df_step = step_tamsd_tracker.to_dataframe(a_val, s_val, seed, scale=1)
+            df_epoch = epoch_tamsd_tracker.to_dataframe(
+                a_val, s_val, seed, scale=60000 // 1024
             )
+            # 1. Combine
+            master_physics_df = pd.concat([df_step, df_epoch], ignore_index=True)
 
-        # 5. Categorize (The Final Step)
-        # Now that alpha/sigma/seed/layer are the right numeric types, we categorize them
-        # to shrink the column memory to 1-byte per row (int8 codes).
-        cat_cols = ["layer", "alpha_init", "sigma_init", "seed"]
-        for col in cat_cols:
-            master_physics_df[col] = master_physics_df[col].astype("category")
+            # 2. Forced Numeric Downcasting (Parameters & Seed)
+            # We do this FIRST so the category labels themselves are small types
+            master_physics_df["alpha_init"] = master_physics_df["alpha_init"].astype(
+                "float32"
+            )
+            master_physics_df["sigma_init"] = master_physics_df["sigma_init"].astype(
+                "float32"
+            )
+            master_physics_df["seed"] = master_physics_df["seed"].astype("int32")
 
-        # 6. Sort and Save
-        master_physics_df = master_physics_df.sort_values(
-            by=["layer", "time_lag", "step"]
-        )
-        master_physics_df.to_parquet(
-            run_dir / "displacement_log.parquet",
-            engine="pyarrow",
-            compression="zstd",
-            index=False,
-        )
+            # 3. Downcast Metrics (The bulk of the data)
+            float_cols = [
+                "net_drift",
+                "abs_mean_dist",
+                "rms_dist",
+                "l_inf_dist",
+                "cos_dist",
+                "snr",
+                "grad_weight_alignment",
+            ]
+            master_physics_df[float_cols] = master_physics_df[float_cols].astype("float32")
+
+            # 4. Downcast Lags and Steps (Integers)
+            int_cols = ["time_lag", "step"]
+            for col in int_cols:
+                master_physics_df[col] = pd.to_numeric(
+                    master_physics_df[col], downcast="integer"
+                )
+
+            # 5. Categorize (The Final Step)
+            # Now that alpha/sigma/seed/layer are the right numeric types, we categorize them
+            # to shrink the column memory to 1-byte per row (int8 codes).
+            cat_cols = ["layer", "alpha_init", "sigma_init", "seed"]
+            for col in cat_cols:
+                master_physics_df[col] = master_physics_df[col].astype("category")
+
+            # 6. Sort and Save
+            master_physics_df = master_physics_df.sort_values(
+                by=["layer", "time_lag", "step"]
+            )
+            master_physics_df.to_parquet(
+                run_dir / "displacement_log.parquet",
+                engine="pyarrow",
+                compression="zstd",
+                index=False,
+            )
 
         return model, run_dir
 
@@ -441,6 +448,7 @@ def run_parameter_sweep(config_path="sweep_config.yaml", num_seeds=1, start_seed
                 seed=s,
                 output_root=str(output_dir),
                 log_freq=cfg["hyperparams"].get("log_freq", 10),
+                track_model=cfg["hyperparams"].get("track_model", False),
             )
 
     print(f"\nUniversality sweep complete. Results archived in: {base_output}")

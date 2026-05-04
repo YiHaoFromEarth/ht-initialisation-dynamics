@@ -1,0 +1,11 @@
+{
+    "alpha": 2.0,
+    "g": 0.25,
+    "seed": 42,
+    "depth": 9,
+    "hidden_size": 784,
+    "lr": 0.01,
+    "batch_size": 128,
+    "activation": "tanh",
+    "num_tasks": 10
+}
