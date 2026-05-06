@@ -1,6 +1,5 @@
 import torch.nn as nn
 import torch
-import matplotlib.pyplot as plt
 
 
 class GeneralMLP(nn.Module):
@@ -51,6 +50,31 @@ class GeneralMLP(nn.Module):
         """Useful for few-shot evaluation later."""
         x = x.view(x.size(0), -1)
         return self.features(x)
+
+    def get_pre_activations(self, x):
+        """
+        Captures the pre-activation input (h) for every linear layer.
+        Essential for verifying the extended critical regime and
+        calculating Jacobian spectral densities.
+        """
+        x = x.view(x.size(0), -1)
+        pre_activations = {}
+        current_layer_idx = 0
+
+        # 1. Process the hidden features
+        for module in self.features:
+            if isinstance(module, nn.Linear):
+                x = module(x)
+                pre_activations[current_layer_idx] = x.detach()
+                current_layer_idx += 1
+            else:
+                x = module(x)
+
+        # 2. Capture the classifier's pre-activation (Final Readout)
+        # This is h^L in the manuscript's notation
+        pre_activations["classifier"] = self.classifier(x).detach()
+
+        return pre_activations
 
 
 class GeneralCNN(nn.Module):
