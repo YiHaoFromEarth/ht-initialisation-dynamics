@@ -21,6 +21,322 @@ from .utils import (
 )
 
 
+class Callback:
+    """Base class for all training extensions."""
+
+    def on_train_begin(self, model=None, **kwargs):
+        pass
+
+    def on_epoch_begin(self, **kwargs):
+        pass
+
+    def on_batch_begin(self, **kwargs):
+        pass
+
+    def on_before_step(self, **kwargs):
+        pass
+
+    def on_batch_end(self, **kwargs):
+        pass
+
+    def on_epoch_end(self, epoch=None, model=None, **kwargs):
+        pass
+
+    def on_train_end(self, **kwargs):
+        pass
+
+
+class CallbackList:
+    def __init__(self, callbacks=None):
+        self.callbacks = [c for c in (callbacks or []) if c is not None]
+
+    def fire(self, hook_name, **kwargs):
+        for cb in self.callbacks:
+            method = getattr(cb, hook_name, None)
+            if method:
+                method(**kwargs)
+
+
+class TAMSDCallback(Callback):
+    def __init__(self, model, track_step=True, track_epoch=True):
+        self.step_tracker = (
+            ModelTracker(model, lags=[1, 2, 4, 8, 16, 32]) if track_step else None
+        )
+        self.epoch_tracker = (
+            ModelTracker(model, lags=[1, 2, 4, 8, 16, 32, 64, 128])
+            if track_epoch
+            else None
+        )
+
+    def on_before_step(self, model=None, **kwargs):
+        if self.step_tracker:
+            grads = torch.cat(
+                [
+                    p.grad.detach().view(-1)
+                    for p in model.parameters()
+                    if p.grad is not None
+                ]
+            )
+            self.step_tracker.update(model, flat_grads=grads)
+
+    def on_epoch_end(self, epoch=None, model=None, **kwargs):
+        if self.epoch_tracker:
+            self.epoch_tracker.update(model)
+
+    def on_train_end(self, **kwargs):
+        if not self.step_tracker or not self.epoch_tracker:
+            return
+
+        seed = kwargs.get("seed", "N/A")
+        ht_config = kwargs.get("ht_config", {})
+        run_dir = kwargs.get("run_dir", Path("."))
+
+        a_val, s_val = ht_config.get("alpha", "N/A"), ht_config.get("g", "N/A")
+
+        df_step = self.step_tracker.to_dataframe(a_val, s_val, seed, scale=1)
+        df_epoch = self.epoch_tracker.to_dataframe(
+            a_val, s_val, seed, scale=60000 // 1024
+        )
+        df = pd.concat([df_step, df_epoch], ignore_index=True)
+
+        float_cols = [
+            "net_drift",
+            "abs_mean_dist",
+            "rms_dist",
+            "l_inf_dist",
+            "cos_dist",
+            "snr",
+            "grad_weight_alignment",
+        ]
+        df[float_cols] = df[float_cols].astype("float32")
+
+        for col in ["layer", "alpha_init", "sigma_init", "seed"]:
+            df[col] = df[col].astype("category")
+
+        df.to_parquet(
+            run_dir / "displacement_log.parquet",
+            engine="pyarrow",
+            compression="zstd",
+            index=False,
+        )
+        print(f"Physics artifacts saved to {run_dir}")
+
+
+class WeightHistoryCallback(Callback):
+    def __init__(self, run_dir, weight_log_epochs):
+        self.checkpoint_dir = Path(run_dir) / "checkpoints"
+        self.checkpoint_dir.mkdir(exist_ok=True)
+        self.weight_log_epochs = weight_log_epochs
+
+    def _save(self, model, epoch):
+        """Helper to avoid duplicating the bfloat16 casting logic."""
+        state = {
+            k: v.to(torch.bfloat16) if torch.is_floating_point(v) else v
+            for k, v in model.state_dict().items()
+        }
+        torch.save(state, self.checkpoint_dir / f"weights_epoch_{epoch}.pth")
+
+    def on_train_begin(self, model=None, **kwargs):
+        if 0 in self.weight_log_epochs:
+            self._save(model, 0)
+
+    def on_epoch_end(self, epoch=None, model=None, **kwargs):
+        if epoch in self.weight_log_epochs:
+            self._save(model, epoch)
+
+
+class ProgressCallback(Callback):
+    def __init__(self, epochs, log_freq, loaders, device, criterion, ht_config):
+        self.log_freq = log_freq
+        self.loaders = loaders
+        self.device = device
+        self.criterion = criterion
+        self.history = []
+        desc = f"alpha={ht_config.get('alpha', 'N/A')} g={ht_config.get('g', 'N/A')}"
+        self.pbar = tqdm(range(1, epochs + 1), desc=desc, file=sys.stdout.terminal)
+
+    def on_train_begin(self, model=None, **kwargs):
+        train_m = evaluate_model(
+            model, self.loaders["train"], self.device, self.criterion
+        )
+        test_m = evaluate_model(
+            model, self.loaders["test"], self.device, self.criterion
+        )
+        self._record_and_print(0, train_m, test_m)
+
+    def on_epoch_end(self, epoch=None, model=None, **kwargs):
+        metrics = kwargs.get("metrics", {})
+        self.pbar.set_postfix(
+            {
+                "T-Acc": f"{metrics['train_acc']:.4f}",
+                "Loss": f"{metrics['train_loss']:.3f}",
+            }
+        )
+        self.pbar.update(1)
+
+        if epoch % self.log_freq == 0:
+            test_m = evaluate_model(
+                model, self.loaders["test"], self.device, self.criterion
+            )
+            self._record_and_print(epoch, metrics, test_m)
+
+    def _record_and_print(self, epoch, train_m, test_m):
+        m = {
+            "epoch": epoch,
+            "train_loss": train_m.get("train_loss", train_m.get("loss")),
+            "train_acc": train_m.get("train_acc", train_m.get("acc")),
+            "test_loss": test_m["loss"],
+            "test_acc": test_m["acc"],
+        }
+        self.history.append(m)
+        sys.stdout.log.write(
+            f"Epoch {epoch} | Train Acc: {m['train_acc']:.4f} | Test Acc: {m['test_acc']:.4f}\n"
+        )
+        sys.stdout.log.flush()
+
+    def on_train_end(self, **kwargs):
+        run_dir = kwargs.get("run_dir", Path("."))
+        model = kwargs.get("model", None)
+        optimizer = kwargs.get("optimizer", None)
+        config_dump = kwargs.get("config_dump", {})
+
+        pd.DataFrame(self.history).to_csv(run_dir / "train_log.csv", index=False)
+        torch.save(
+            {
+                "model_state": model.state_dict(),
+                "optim_state": optimizer.state_dict(),
+            },
+            run_dir / "checkpoints/final_model.pth",
+        )
+
+        with open(run_dir / "run_config.json", "w") as f:
+            json.dump(config_dump, f, indent=4)
+
+
+def train_single_epoch(model, loader, optimizer, criterion, device, epoch, callbacks):
+    """
+    Core training loop for a single epoch.
+    Add-ons are handled via callbacks.
+    """
+    model.train()
+    train_loss, train_correct, train_total = 0.0, 0, 0
+
+    callbacks.fire("on_epoch_begin", epoch=epoch)
+
+    for batch_idx, (inputs, labels) in enumerate(loader):
+        inputs, labels = inputs.to(device), labels.to(device)
+
+        callbacks.fire("on_batch_begin", batch_idx=batch_idx)
+
+        # 1. Forward Pass
+        optimizer.zero_grad()
+        outputs = model(inputs)
+        loss = criterion(outputs, labels)
+
+        # 2. Backward Pass
+        loss.backward()
+
+        # 3. The Modifier Hook (Grad Clipping / TAMSD live here)
+        # We pass the model so callbacks can access model.parameters()
+        callbacks.fire("on_before_step", model=model)
+
+        # 4. Weight Update
+        optimizer.step()
+
+        # 5. Internal Metrics
+        train_loss += loss.item()
+        _, predicted = outputs.max(1)
+        train_total += labels.size(0)
+        train_correct += predicted.eq(labels).sum().item()
+
+        # 6. Post-Step Hook (Batch logging)
+        callbacks.fire("on_batch_end", model=model, loss=loss.item())
+
+    # Final epoch calculations
+    avg_loss = train_loss / len(loader)
+    avg_acc = train_correct / train_total
+
+    # 7. Final Hook (Validation / Checkpointing / Heavy-Tailed Analysis)
+    # We pass metrics as a dict so callbacks can use them for logging
+    metrics = {"train_loss": avg_loss, "train_acc": avg_acc}
+    callbacks.fire("on_epoch_end", epoch=epoch, model=model, metrics=metrics)
+
+    return metrics
+
+
+def setup_experiment_dir(output_root, model_name, lr, batch_size, seed):
+    """Handles folder creation and console logging setup."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    folder_name = f"{model_name}_LR{lr}_BS{batch_size}_{timestamp}_s{seed}"
+    run_dir = Path(output_root) / folder_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # Setup logging
+    log_file = run_dir / "console_output.txt"
+    sys.stdout = TeeLogger(log_file)
+    print(f"Logging initialized in: {run_dir}")
+
+    return run_dir
+
+
+def build_research_model(model_input, model_params, ht_config, seed, device):
+    """Initializes the model and applies custom research initializations."""
+    if isinstance(model_input, nn.Module):
+        model = model_input
+    else:
+        m_args = model_params.get("args", [])
+        m_kwargs = model_params.get("kwargs", {})
+        model = model_factory(model_input, *m_args, **m_kwargs)
+
+    if ht_config and ht_config.get("enabled"):
+        print(f"Applying Heavy-Tailed Init (α={ht_config.get('alpha')})")
+        model = apply_heavy_tailed_init(
+            model, ht_config["alpha"], ht_config["g"], base_seed=seed
+        )
+
+    return model.to(device)
+
+
+def document_architecture(model, run_dir, loaders=None, data_config=None):
+    """
+    Summarizes the model architecture and saves it to a text file.
+    Infers input shape from the data loader or falls back to config.
+    """
+    run_dir = Path(run_dir)
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Infer input shape
+    input_shape = None
+
+    # Try to get shape from actual data first (most robust)
+    if loaders and "train" in loaders:
+        try:
+            example_data, _ = next(iter(loaders["train"]))
+            input_shape = example_data.shape
+        except (StopIteration, AttributeError):
+            pass
+
+    # 2. Fallback logic if loader failed or wasn't provided
+    if input_shape is None:
+        data_config = data_config or {}
+        batch_size = data_config.get("batch_size", 32)
+
+        if data_config.get("dataset_name") == "CIFAR-10":
+            input_shape = (batch_size, 3, 32, 32)
+        else:
+            # Default to MNIST-style
+            input_shape = (batch_size, 1, 28, 28)
+
+    # 3. Generate and save summary
+    try:
+        stats = summary(model, input_size=input_shape, verbose=0)
+        with open(run_dir / "architecture.txt", "w") as f:
+            f.write(str(stats))
+        print(f"Architecture documented at {run_dir / 'architecture.txt'}")
+    except Exception as e:
+        print(f"Failed to document architecture: {e}")
+
+
 def train_model(
     model_input,
     ht_config,
@@ -33,20 +349,11 @@ def train_model(
     seed,
     output_root,
     log_freq=10,
-    track_model=False
+    track_model=False,
 ):
     """
     Foundational orchestrator to initialize, train, and log an ML experiment.
     """
-
-    def save_half_precision(state_dict, path):
-        """Helper to cast weights to bfp16 before saving to disk."""
-        half_state = {
-            k: v.to(torch.bfloat16) if torch.is_floating_point(v) else v
-            for k, v in state_dict.items()
-        }
-        torch.save(half_state, path)
-
     # Store the original terminal handle
     original_stdout = sys.stdout
     logger = None
@@ -57,282 +364,65 @@ def train_model(
 
         device = hyperparams.get("device", "cpu")
 
-        # 2. Flexible Model Acquisition
-        if isinstance(model_input, nn.Module):
-            # We were passed a pre-initialized model instance
-            model = model_input
-            model_name = model.__class__.__name__
-        else:
-            # Standard path: Initialize from class and params
-            m_args = model_params.get("args", [])
-            m_kwargs = model_params.get("kwargs", {})
-            model = model_factory(model_input, *m_args, **m_kwargs)
-            model_name = model_input.__name__
-        if model is None:
-            return None  # Graceful exit on init failure
+        model_name = (
+            model_input.__name__
+            if not isinstance(model_input, nn.Module)
+            else model_input.__class__.__name__
+        )
+        run_dir = setup_experiment_dir(
+            output_root,
+            model_name,
+            optim_params.get("lr"),
+            data_config["batch_size"],
+            torch.seed,
+        )
 
-        # 3. Directory and Metadata Setup
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        folder_name = f"{model_name}_LR{optim_params.get('lr', 'N/A')}_BS{data_config['batch_size']}_{timestamp}_s{seed}"
-        run_dir = Path(output_root) / folder_name
-        run_dir.mkdir(parents=True, exist_ok=True)
-
-        # Start logging console output to file
-        sys.stdout = TeeLogger(run_dir / "console_output.txt")
-        print(f"Logging initialized in: {run_dir}")
-
-        # 3.1. Apply Heavy-Tailed Initialization (The Research Hook)
-        # We check if ht_config exists; if not, it stays as standard Gaussian/Kaiming
-        if ht_config and ht_config.get("enabled", False):
-            alpha = ht_config.get("alpha", 1.2)
-            g = ht_config.get("g", 1.0)
-
-            # We pass the same 'seed' used in set_seed to ensure HT weights
-            # are tied to the experimental trial
-            print(
-                f"Overwriting weights with Heavy-Tailed Distribution (α={alpha}, g={g})"
-            )
-            model = apply_heavy_tailed_init(model, alpha, g, base_seed=seed)
-
-        # Now move to device after weights are set
-        model = model.to(device)
-
-        # 4. Optimizer Initialization (via Factory)
+        model = build_research_model(model_input, model_params, ht_config, seed, device)
         optimizer = optimizer_factory(optim_class, model.parameters(), **optim_params)
-        if optimizer is None:
-            return None
-
-        # 5. Architecture Documentation
-        with open(run_dir / "architecture.txt", "w") as f:
-            # Dynamically infer input shape from the data loader
-            # This prevents hard-coding (1, 28, 28) for MNIST vs (3, 32, 32) for CIFAR-10
-            try:
-                # Get one batch from the training loader
-                example_data, _ = next(iter(loaders["train"]))
-                # Extract shape: (BatchSize, Channels, Height, Width)
-                input_shape = example_data.shape
-            except (KeyError, StopIteration):
-                # Fallback to config if loader is unavailable
-                # Assumes 3072 for CIFAR-10 flattened or (3, 32, 32)
-                batch_size = data_config.get("batch_size", 32)
-                if data_config.get("dataset_name") == "CIFAR-10":
-                    input_shape = (batch_size, 3, 32, 32)
-                else:
-                    input_shape = (batch_size, 1, 28, 28)
-            stats = summary(model, input_size=input_shape, verbose=0)
-            f.write(str(stats))
-
-        checkpoint_dir = run_dir / "checkpoints"
-        checkpoint_dir.mkdir(exist_ok=True)
-        # 5.1. Initial Weight Snapshot
-        if hyperparams.get("save_weights_history", False) and 0 in hyperparams.get(
-            "weight_log_epochs", []
-        ):
-            save_half_precision(
-                model.state_dict(), checkpoint_dir / "weights_epoch_0.pth"
-            )
-
-        # 6. Training Loop Logic
         criterion = nn.CrossEntropyLoss()
-        history = []
 
-        step_tamsd_tracker = None
-        epoch_tamsd_tracker = None
-        if track_model:
-            step_tamsd_tracker = ModelTracker(model, lags=[1, 2, 4, 8, 16, 32])
-            epoch_tamsd_tracker = ModelTracker(model, lags=[1, 2, 4, 8, 16, 32, 64, 128])
+        document_architecture(model, run_dir, loaders=loaders, data_config=data_config)
 
-        # --- Epoch 0: Initial Evaluation ---
-        train_m = evaluate_model(model, loaders["train"], device, criterion)
-        test_m = evaluate_model(model, loaders["test"], device, criterion)
-
-        metrics_0 = {
-            "epoch": 0,
-            "train_loss": train_m["loss"],
-            "train_acc": train_m["acc"],
-            "test_loss": test_m["loss"],
-            "test_acc": test_m["acc"],
-        }
-        history.append(metrics_0)
-        sys.stdout.log.write(
-            f"Epoch 0 | Train Acc: {metrics_0['train_acc']:.4f} | Test Acc: {metrics_0['test_acc']:.4f}\n"
+        logger_cb = ProgressCallback(
+            hyperparams["epochs"], log_freq, loaders, device, criterion, ht_config
         )
-        sys.stdout.log.flush()
 
-        pbar = tqdm(
-            range(1, hyperparams["epochs"] + 1),
-            file=sys.stdout.terminal,  # Write bar to original terminal
-            desc=f"alpha={ht_config.get('alpha', 'N/A')} g={ht_config.get('g', 'N/A')}",
+        callbacks = CallbackList(
+            [
+                logger_cb,
+                TAMSDCallback(model) if track_model else None,
+                WeightHistoryCallback(run_dir, hyperparams.get("weight_log_epochs", []))
+                if hyperparams.get("save_weights_history")
+                else None,
+            ]
         )
-        for epoch in pbar:
-            model.train()
-            train_loss, train_correct, train_total = 0.0, 0, 0
 
-            # Training Phase
-            for inputs, labels in loaders["train"]:
-                inputs, labels = inputs.to(device), labels.to(device)
+        callbacks.fire("on_train_begin", config=ht_config)
 
-                optimizer.zero_grad()
-                outputs = model(inputs)
-                loss = criterion(outputs, labels)
-                loss.backward()
-
-                if "grad_clip" in hyperparams:
-                    torch.nn.utils.clip_grad_norm_(
-                        model.parameters(), hyperparams["grad_clip"]
-                    )
-
-                current_grads = torch.cat(
-                    [
-                        p.grad.detach().view(-1)
-                        for p in model.parameters()
-                        if p.grad is not None
-                    ]
-                )
-
-                optimizer.step()
-
-                if step_tamsd_tracker is not None:
-                    step_tamsd_tracker.update(model, flat_grads=current_grads)
-
-                train_loss += loss.item()
-                _, predicted = outputs.max(1)
-                train_total += labels.size(0)
-                train_correct += predicted.eq(labels).sum().item()
-
-            if epoch_tamsd_tracker is not None:
-                epoch_tamsd_tracker.update(model)
-            current_train_acc = train_correct / train_total
-            current_train_loss = train_loss / len(loaders["train"])
-
-            # 7. Periodic Logging and Test Evaluation
-            if epoch % log_freq == 0:
-                test_metrics = evaluate_model(model, loaders["test"], device, criterion)
-
-                metrics = {
-                    "epoch": epoch,
-                    "train_loss": current_train_loss,
-                    "train_acc": current_train_acc,
-                    "test_loss": test_metrics["loss"],
-                    "test_acc": test_metrics["acc"],
-                }
-
-                history.append(metrics)
-                sys.stdout.log.write(
-                    f"Epoch {epoch} | Train Acc: {metrics['train_acc']:.4f} | Test Acc: {metrics['test_acc']:.4f}\n"
-                )
-                sys.stdout.log.flush()
-
-            # --- New: Periodic Weight Saving for Physics Analysis ---
-            if hyperparams.get(
-                "save_weights_history", False
-            ) and epoch in hyperparams.get("weight_log_epochs", []):
-                checkpoint_dir = run_dir / "checkpoints"
-                checkpoint_dir.mkdir(exist_ok=True)
-                save_half_precision(
-                    model.state_dict(), checkpoint_dir / f"weights_epoch_{epoch}.pth"
-                )
-
-            pbar.set_postfix(
-                {
-                    "T-Acc": f"{current_train_acc:.4f}",
-                    "Loss": f"{current_train_loss:.3f}",
-                }
+        for epoch in range(1, hyperparams["epochs"] + 1):
+            train_single_epoch(
+                model, loaders["train"], optimizer, criterion, device, epoch, callbacks
             )
 
         # 8. Final Artifact Export
-        pd.DataFrame(history).to_csv(run_dir / "train_log.csv", index=False)
-        torch.save(
-            {
-                "model_state": model.state_dict(),
-                "optim_state": optimizer.state_dict(),
-                "hyperparams": hyperparams,
-                "seed": seed,
-            },
-            run_dir / "checkpoints/final_model.pth",
-        )
-
-        # Inside train_model, before json.dump:
-        # We create a copy so we don't break the actual 'live' dictionary
-        saveable_data_config = data_config.copy()
-
-        # Convert the Compose object into a readable string
-        if "transform" in saveable_data_config:
-            saveable_data_config["transform"] = str(saveable_data_config["transform"])
-
-        # Save exact configuration for audit trail
-        config_dump = {
+        saveable_config = {
             "model": model_name,
             "model_params": model_params,
-            "optimizer": optim_class.__name__,
-            "optimizer_params": optim_params,
-            "hyperparams": hyperparams,
-            "data_config": saveable_data_config,
             "ht_config": ht_config,
-            "seed": seed,
+            "data_config": {
+                k: (str(v) if k == "transform" else v) for k, v in data_config.items()
+            },
         }
-        with open(run_dir / "run_config.json", "w") as f:
-            json.dump(config_dump, f, indent=4)
 
-        if step_tamsd_tracker is not None and epoch_tamsd_tracker is not None:
-            # Extract metadata for the DataFrame
-            a_val = ht_config.get("alpha", "N/A")
-            s_val = ht_config.get("g", "N/A")
-
-            # --- 1. Get DataFrames ---
-            df_step = step_tamsd_tracker.to_dataframe(a_val, s_val, seed, scale=1)
-            df_epoch = epoch_tamsd_tracker.to_dataframe(
-                a_val, s_val, seed, scale=60000 // 1024
-            )
-            # 1. Combine
-            master_physics_df = pd.concat([df_step, df_epoch], ignore_index=True)
-
-            # 2. Forced Numeric Downcasting (Parameters & Seed)
-            # We do this FIRST so the category labels themselves are small types
-            master_physics_df["alpha_init"] = master_physics_df["alpha_init"].astype(
-                "float32"
-            )
-            master_physics_df["sigma_init"] = master_physics_df["sigma_init"].astype(
-                "float32"
-            )
-            master_physics_df["seed"] = master_physics_df["seed"].astype("int32")
-
-            # 3. Downcast Metrics (The bulk of the data)
-            float_cols = [
-                "net_drift",
-                "abs_mean_dist",
-                "rms_dist",
-                "l_inf_dist",
-                "cos_dist",
-                "snr",
-                "grad_weight_alignment",
-            ]
-            master_physics_df[float_cols] = master_physics_df[float_cols].astype("float32")
-
-            # 4. Downcast Lags and Steps (Integers)
-            int_cols = ["time_lag", "step"]
-            for col in int_cols:
-                master_physics_df[col] = pd.to_numeric(
-                    master_physics_df[col], downcast="integer"
-                )
-
-            # 5. Categorize (The Final Step)
-            # Now that alpha/sigma/seed/layer are the right numeric types, we categorize them
-            # to shrink the column memory to 1-byte per row (int8 codes).
-            cat_cols = ["layer", "alpha_init", "sigma_init", "seed"]
-            for col in cat_cols:
-                master_physics_df[col] = master_physics_df[col].astype("category")
-
-            # 6. Sort and Save
-            master_physics_df = master_physics_df.sort_values(
-                by=["layer", "time_lag", "step"]
-            )
-            master_physics_df.to_parquet(
-                run_dir / "displacement_log.parquet",
-                engine="pyarrow",
-                compression="zstd",
-                index=False,
-            )
+        callbacks.fire(
+            "on_train_end",
+            run_dir=run_dir,
+            model=model,
+            optimizer=optimizer,
+            config_dump=saveable_config,
+            ht_config=ht_config,
+            seed=seed,
+        )
 
         return model, run_dir
 
