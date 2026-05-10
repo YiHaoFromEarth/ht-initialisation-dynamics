@@ -5,3 +5,4 @@ from . import architectures
 from . import equations
 from . import analysis
 from . import rmt
+from . import continual_learning
