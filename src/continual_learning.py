@@ -187,14 +187,19 @@ def spectral_norm_with_gain(module, gain=1.2, name="weight", n_power_iterations=
     return module
 
 
-def update_GPM_bases(model, images, threshold, feature_list=None):
+def update_GPM_bases(model, images, threshold, feature_list=None, activation_fn=torch.tanh):
     model.eval()
     with torch.no_grad():
         reps = model.get_pre_activations(images)
 
-    all_inputs = [images]
+    # FIX: Explicitly flatten the raw images to 2D (Batch, 784)
+    flattened_images = images.view(images.size(0), -1)
+    all_inputs = [flattened_images]
+
     for h in list(reps.values())[:-1]:
-        all_inputs.append(torch.tanh(h))
+        # Hidden activations from nn.Linear are already 2D, but we ensure it
+        activated_h = activation_fn(h)
+        all_inputs.append(activated_h.view(h.size(0), -1))
 
     if feature_list is None:
         feature_list = [None] * len(all_inputs)
@@ -233,11 +238,17 @@ def update_GPM_bases(model, images, threshold, feature_list=None):
     return tensor_bases, current_ranks
 
 
-def apply_GPM_projection(linear_layers, feature_list):
+def apply_GPM_projection(linear_layers, feature_list, alpha=0.01, use_gating=True):
     """
+    Applies an asymmetric directional gate to Leaky GPM.
+    If the parallel gradient is cooperative (Frobenius inner product > 0), allows alpha leakage.
+    If destructive (inner product <= 0), clamps leakage to 0.0 to prevent memory erasure.
+
     Args:
         linear_layers: A pre-cached list of nn.Linear modules.
-        feature_list: The pre-loaded GPU tensors from update_GPM_bases.
+        feature_list: The pre-loaded GPU tensors of basis matrices.
+        alpha: Maximum permitted leakage factor for cooperative steps.
+        use_gating: Boolean flag to toggle the directional gating protection.
     """
     if feature_list is None:
         return
@@ -251,8 +262,32 @@ def apply_GPM_projection(linear_layers, feature_list):
             if grad is None:
                 continue
 
-            basis = feature_list[i]  # Already a GPU tensor!
+            basis = feature_list[i]  # Shape: (In_Features, K)
 
-            # Math: g_proj = g - (g @ B @ B.T)
-            proj_grad = grad - torch.mm(torch.mm(grad, basis), basis.t())
-            layer.weight.grad.copy_(proj_grad)
+            # 1. Isolate the parallel component (the projection onto past subspace)
+            # Math: g_parallel = g @ B @ B.T
+            parallel_grad = torch.mm(torch.mm(grad, basis), basis.t())
+
+            # 2. Isolate the orthogonal component
+            # Math: g_orthogonal = g - g_parallel
+            ortho_grad = grad - parallel_grad
+
+            # 3. Compute Directional Gating Logic
+            effective_alpha = alpha
+
+            if use_gating:
+                # Isolate the current weight landscape inside the same past subspace
+                parallel_weight = torch.mm(torch.mm(layer.weight, basis), basis.t())
+
+                # Compute the true Frobenius Inner Product (Matrix Dot Product)
+                dot_product = torch.sum(parallel_grad * parallel_weight).item()
+
+                # If the gradient points AGAINST the weights, it's destructive -> kill the leak
+                if dot_product <= 0:
+                    effective_alpha = 0.0
+
+            # 4. Recombine components using the gated alpha value
+            gated_grad = ortho_grad + effective_alpha * parallel_grad
+
+            # Update the gradient in-place
+            layer.weight.grad.copy_(gated_grad)
