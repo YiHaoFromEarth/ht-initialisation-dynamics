@@ -1,3 +1,5 @@
+from xml.parsers.expat import model
+
 import torch
 import numpy as np
 import torch.nn as nn
@@ -238,17 +240,20 @@ def update_GPM_bases(model, images, threshold, feature_list=None, activation_fn=
     return tensor_bases, current_ranks
 
 
-def apply_GPM_projection(linear_layers, feature_list, alpha=0.01, use_gating=True):
+def apply_GPM_projection(linear_layers, feature_list, ema_buffers, alpha=0.01,
+                         use_gating=True, beta=0.99, tau=0.01):
     """
-    Applies an asymmetric directional gate to Leaky GPM.
-    If the parallel gradient is cooperative (Frobenius inner product > 0), allows alpha leakage.
-    If destructive (inner product <= 0), clamps leakage to 0.0 to prevent memory erasure.
+    Applies an asymmetric directional gate to Leaky GPM regulated by an
+    Exponential Moving Average (EMA) and custom noise-floor threshold.
 
     Args:
         linear_layers: A pre-cached list of nn.Linear modules.
         feature_list: The pre-loaded GPU tensors of basis matrices.
+        ema_buffers: Persistent dictionary tracking the historical alignment per layer.
         alpha: Maximum permitted leakage factor for cooperative steps.
-        use_gating: Boolean flag to toggle the directional gating protection.
+        use_gating: Boolean flag to toggle the temporal gating protection.
+        beta: Momentum factor for the EMA tracking corridor (low-pass filter).
+        tau: Gating threshold parameter to cut through the background noise floor.
     """
     if feature_list is None:
         return
@@ -263,6 +268,7 @@ def apply_GPM_projection(linear_layers, feature_list, alpha=0.01, use_gating=Tru
                 continue
 
             basis = feature_list[i]  # Shape: (In_Features, K)
+            layer_key = f'layer_{i}'
 
             # 1. Isolate the parallel component (the projection onto past subspace)
             # Math: g_parallel = g @ B @ B.T
@@ -282,12 +288,150 @@ def apply_GPM_projection(linear_layers, feature_list, alpha=0.01, use_gating=Tru
                 # Compute the true Frobenius Inner Product (Matrix Dot Product)
                 dot_product = torch.sum(parallel_grad * parallel_weight).item()
 
-                # If the gradient points AGAINST the weights, it's destructive -> kill the leak
-                if dot_product <= 0:
+                # Calculate normalized Frobenius cosine similarity (-1.0 to +1.0)
+                p_grad_norm = torch.linalg.norm(parallel_grad).item()
+                p_weight_norm = torch.linalg.norm(parallel_weight).item()
+
+                current_raw_alignment = 0.0
+                if p_grad_norm > 0 and p_weight_norm > 0:
+                    current_raw_alignment = dot_product / (p_grad_norm * p_weight_norm)
+
+                # Update the temporal moving average buffer
+                if layer_key not in ema_buffers:
+                    ema_buffers[layer_key] = current_raw_alignment
+                else:
+                    ema_buffers[layer_key] = (beta * ema_buffers[layer_key]) + ((1.0 - beta) * current_raw_alignment)
+
+                # The gate now requires the historical trend line to clear the custom floor tau
+                if ema_buffers[layer_key] <= tau:
                     effective_alpha = 0.0
 
             # 4. Recombine components using the gated alpha value
             gated_grad = ortho_grad + effective_alpha * parallel_grad
+
+            # Update the gradient in-place
+            layer.weight.grad.copy_(gated_grad)
+
+
+def update_MSG_bases(model, images, k_max=30, window_size=5, gamma=2.0, alpha_target=1.2, feature_list=None):
+    """
+    Multifractal Singularity Gating (MSG) Base Optimizer.
+
+    Args:
+        model: The network model exposing 'get_pre_activations' and 'state_dict'.
+        images: Batch of mini-batch images [B, C, H, W] to run the dynamic stress test.
+        k_max: The signal horizon ceiling (Hyperparameter 1). Default 30.
+        window_size: Width of sliding window for OLS calculus (Hyperparameter 2). Default 5.
+        gamma: Exponential protection scaling coefficient (Hyperparameter 3). Default 2.0.
+        alpha_target: Manifold anchor target matching our corridor boundary. Default 1.2.
+        feature_list: List of stored continuous projection operators per layer.
+    """
+    model.eval()
+    device = next(model.parameters()).device
+
+    with torch.no_grad():
+        reps = model.get_pre_activations(images)
+        weights = model.get_layer_weights()
+
+    layer_keys = list(reps.keys())
+
+    # Initialize list to hold raw NumPy operators during this boundary calculation step
+    numpy_feature_list = [None] * len(layer_keys)
+
+    current_ranks = []
+    half_w = window_size // 2
+
+    for i, key in enumerate(layer_keys):
+        h = reps[key].detach()          # Shape: [B, D_out]
+        W = weights[key].detach()        # Shape: [D_out, D_in]
+
+        # 1. Analytic Jacobian calculation
+        tanh_deriv = 1.0 - torch.tanh(h).pow(2)     # Shape: [B, D_out]
+        mean_deriv = torch.mean(tanh_deriv, dim=0)   # Shape: [D_out]
+
+        # J_batch maps sensitivity across input coordinates
+        J_batch = mean_deriv.unsqueeze(1) * W       # Shape: [D_out, D_in]
+
+        # 2. Decompose Jacobian operator
+        _, S_jac, Vh_jac = torch.linalg.svd(J_batch, full_matrices=False)
+
+        # Explicitly migrate spectral outputs to CPU for NumPy OLS processing
+        S_vals = S_jac.cpu().numpy()
+        V = Vh_jac.cpu().numpy().T  # Shape: [D_in, Rank]
+
+        actual_k_max = min(k_max, len(S_vals) - half_w - 1)
+        current_ranks.append(actual_k_max)
+
+        # 3. Discrete log-log OLS calculus loop
+        log_k = np.log(np.arange(1, len(S_vals) + 1))
+        log_S = np.log(S_vals)
+        phi = np.zeros(V.shape[1])
+
+        for k_idx in range(half_w, actual_k_max):
+            x_win = log_k[k_idx - half_w : k_idx + half_w + 1]
+            y_win = log_S[k_idx - half_w : k_idx + half_w + 1]
+
+            slope, _ = np.polyfit(x_win, y_win, 1)
+            alpha_local = -slope
+
+            # Continuous Protection Mapping
+            phi[k_idx] = np.exp(-gamma * max(0.0, alpha_local - alpha_target))
+
+        # Guarantee safety for dominant structural skyscrapers at the head
+        phi[:half_w] = 1.0
+
+        # Add this temporary diagnostic print right before 'task_operator = (V * phi) @ V.T'
+        if k_idx == actual_k_max - 1:
+            print(f"Layer {key} | Raw Slopes sample: {alpha_local:.2f} | Phi sample: {phi[k_idx]:.4f}")
+            print(f"Layer {key} | Non-zero Phi components: {np.sum(phi > 0.01)} out of {len(phi)}")
+
+        # 4. Construct continuous soft gating projection matrix operator
+        task_operator = (V * phi) @ V.T
+
+        # 5. Envelope consolidation rule with type safety
+        if feature_list is None or feature_list[i] is None:
+            numpy_feature_list[i] = task_operator
+        else:
+            # Explicitly bring the existing GPU tensor back to host memory before envelope merge
+            old_operator = feature_list[i].detach().cpu().numpy()
+            numpy_feature_list[i] = np.maximum(old_operator, task_operator)
+
+    # Re-wrap directly to model tensor parameters device destination
+    tensor_operators = [
+        torch.tensor(op, dtype=torch.float32, device=device) if op is not None else None
+        for op in numpy_feature_list
+    ]
+
+    return tensor_operators, current_ranks
+
+
+def apply_MSG_projection(linear_layers, feature_list):
+    """
+    Applies continuous, multifractal soft gating to the gradients.
+
+    Args:
+        linear_layers: A pre-cached list of nn.Linear modules.
+        feature_list: Pre-computed continuous protection operators P from update_MSG_bases.
+                      Each operator has shape [D_in, D_in].
+    """
+    if feature_list is None:
+        return
+
+    with torch.no_grad():
+        for i, layer in enumerate(linear_layers):
+            if i >= len(feature_list) or feature_list[i] is None:
+                continue
+
+            grad = layer.weight.grad
+            if grad is None:
+                continue
+
+            # P is the pre-loaded GPU tensor operator matrix [D_in, D_in]
+            P = feature_list[i]
+
+            # Attenuate the gradient components along protected axes:
+            # grad has shape [D_out, D_in], P has shape [D_in, D_in]
+            gated_grad = grad - torch.mm(grad, P)
 
             # Update the gradient in-place
             layer.weight.grad.copy_(gated_grad)
