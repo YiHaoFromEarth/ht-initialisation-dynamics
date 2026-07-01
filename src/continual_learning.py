@@ -313,106 +313,102 @@ def apply_GPM_projection(linear_layers, feature_list, ema_buffers, alpha=0.01,
             layer.weight.grad.copy_(gated_grad)
 
 
-def update_MSG_bases(model, images, k_max=30, window_size=5, gamma=2.0, alpha_target=1.2, feature_list=None):
+def update_PowerGPM_bases(model, images, gamma=0.5, q_thresh=0.2, energy_cutoff=0.99,
+                          feature_list=None, activation_fn=torch.tanh):
     """
-    Multifractal Singularity Gating (MSG) Base Optimizer.
+    Extracts structurally meaningful basis vectors using fractional energy truncation,
+    preventing subspace saturation while calculating power-law leakage.
 
     Args:
-        model: The network model exposing 'get_pre_activations' and 'state_dict'.
-        images: Batch of mini-batch images [B, C, H, W] to run the dynamic stress test.
-        k_max: The signal horizon ceiling (Hyperparameter 1). Default 30.
-        window_size: Width of sliding window for OLS calculus (Hyperparameter 2). Default 5.
-        gamma: Exponential protection scaling coefficient (Hyperparameter 3). Default 2.0.
-        alpha_target: Manifold anchor target matching our corridor boundary. Default 1.2.
-        feature_list: List of stored continuous projection operators per layer.
+        model: The active neural network module.
+        images: Calibration image batch tensor.
+        gamma: Exponent tuning the steepness of the power-law protection curve.
+        q_thresh: Fractional order power to flatten the power-law spectrum for truncation.
+        energy_cutoff: Cumulative variance percentage to retain (e.g., 0.99).
+        feature_list: Persistent list tracking [basis_matrix, leakage_vector] per layer.
     """
     model.eval()
-    device = next(model.parameters()).device
-
     with torch.no_grad():
         reps = model.get_pre_activations(images)
-        weights = model.get_layer_weights()
 
-    layer_keys = list(reps.keys())
+    flattened_images = images.view(images.size(0), -1)
+    all_inputs = [flattened_images]
 
-    # Initialize list to hold raw NumPy operators during this boundary calculation step
-    numpy_feature_list = [None] * len(layer_keys)
+    for h in list(reps.values())[:-1]:
+        activated_h = activation_fn(h)
+        all_inputs.append(activated_h.view(h.size(0), -1))
+
+    if feature_list is None:
+        feature_list = [None] * len(all_inputs)
 
     current_ranks = []
-    half_w = window_size // 2
 
-    for i, key in enumerate(layer_keys):
-        h = reps[key].detach()          # Shape: [B, D_out]
-        W = weights[key].detach()        # Shape: [D_out, D_in]
+    for i, activation in enumerate(all_inputs):
+        X = activation.cpu().numpy()
+        U, S, Vh = np.linalg.svd(X, full_matrices=False)
 
-        # 1. Analytic Jacobian calculation
-        tanh_deriv = 1.0 - torch.tanh(h).pow(2)     # Shape: [B, D_out]
-        mean_deriv = torch.mean(tanh_deriv, dim=0)   # Shape: [D_out]
+        # 1. Compute the compressed fractional energy spectrum
+        # Using a small q power flattens the power law, allowing us to find the true noise floor
+        fractional_energy = S ** (2 * q_thresh)
+        cumulative_fractional_var = np.cumsum(fractional_energy) / np.sum(fractional_energy)
 
-        # J_batch maps sensitivity across input coordinates
-        J_batch = mean_deriv.unsqueeze(1) * W       # Shape: [D_out, D_in]
+        # Determine the truncation cutoff index k
+        k = np.argmax(cumulative_fractional_var >= energy_cutoff) + 1
+        current_ranks.append(k)
 
-        # 2. Decompose Jacobian operator
-        _, S_jac, Vh_jac = torch.linalg.svd(J_batch, full_matrices=False)
+        # 2. Extract only the active structural directions and singular values
+        S_truncated = S[:k]
+        task_basis = Vh[:k].T  # Shape: (In_Features, k)
 
-        # Explicitly migrate spectral outputs to CPU for NumPy OLS processing
-        S_vals = S_jac.cpu().numpy()
-        V = Vh_jac.cpu().numpy().T  # Shape: [D_in, Rank]
+        # 3. Calculate scale-invariant leakage vector ONLY across the active coordinates
+        relative_energy = (S_truncated / (S_truncated.max() + 1e-10)) ** gamma
+        leakage_vector = 1.0 - relative_energy
 
-        actual_k_max = min(k_max, len(S_vals) - half_w - 1)
-        current_ranks.append(actual_k_max)
-
-        # 3. Discrete log-log OLS calculus loop
-        log_k = np.log(np.arange(1, len(S_vals) + 1))
-        log_S = np.log(S_vals)
-        phi = np.zeros(V.shape[1])
-
-        for k_idx in range(half_w, actual_k_max):
-            x_win = log_k[k_idx - half_w : k_idx + half_w + 1]
-            y_win = log_S[k_idx - half_w : k_idx + half_w + 1]
-
-            slope, _ = np.polyfit(x_win, y_win, 1)
-            alpha_local = -slope
-
-            # Continuous Protection Mapping
-            phi[k_idx] = np.exp(-gamma * max(0.0, alpha_local - alpha_target))
-
-        # Guarantee safety for dominant structural skyscrapers at the head
-        phi[:half_w] = 1.0
-
-        # Add this temporary diagnostic print right before 'task_operator = (V * phi) @ V.T'
-        if k_idx == actual_k_max - 1:
-            print(f"Layer {key} | Raw Slopes sample: {alpha_local:.2f} | Phi sample: {phi[k_idx]:.4f}")
-            print(f"Layer {key} | Non-zero Phi components: {np.sum(phi > 0.01)} out of {len(phi)}")
-
-        # 4. Construct continuous soft gating projection matrix operator
-        task_operator = (V * phi) @ V.T
-
-        # 5. Envelope consolidation rule with type safety
-        if feature_list is None or feature_list[i] is None:
-            numpy_feature_list[i] = task_operator
+        if feature_list[i] is None:
+            feature_list[i] = (task_basis, leakage_vector)
         else:
-            # Explicitly bring the existing GPU tensor back to host memory before envelope merge
-            old_operator = feature_list[i].detach().cpu().numpy()
-            numpy_feature_list[i] = np.maximum(old_operator, task_operator)
+            # Reconcile sequential tasks cleanly on host CPU memory
+            old_basis_tensor, old_leak = feature_list[i]
+            old_basis = old_basis_tensor.detach().cpu().numpy()
 
-    # Re-wrap directly to model tensor parameters device destination
-    tensor_operators = [
-        torch.tensor(op, dtype=torch.float32, device=device) if op is not None else None
-        for op in numpy_feature_list
-    ]
+            combined = np.concatenate((old_basis, task_basis), axis=1)
+            U_new, S_new, _ = np.linalg.svd(combined, full_matrices=False)
 
-    return tensor_operators, current_ranks
+            # Run the fractional check on the combined space to keep dimensions tight
+            frac_energy_new = S_new ** (2 * q_thresh)
+            cum_frac_var_new = np.cumsum(frac_energy_new) / np.sum(frac_energy_new)
+            k_new = np.argmax(cum_frac_var_new >= energy_cutoff) + 1
+
+            merged_basis = U_new[:, :k_new]
+            rel_energy_new = (S_new[:k_new] / (S_new[:k_new].max() + 1e-10)) ** gamma
+            merged_leak = 1.0 - rel_energy_new
+
+            feature_list[i] = (merged_basis, merged_leak)
+
+    # Pre-load the pruned, scale-aware matrices to the GPU device
+    device = next(model.parameters()).device
+    tensor_bases = []
+    for item in feature_list:
+        if item is not None:
+            b_mat, l_vec = item
+            t_basis = torch.tensor(b_mat, dtype=torch.float32, device=device)
+            t_leak = torch.tensor(l_vec, dtype=torch.float32, device=device)
+            tensor_bases.append((t_basis, t_leak))
+        else:
+            tensor_bases.append(None)
+
+    return tensor_bases, current_ranks
 
 
-def apply_MSG_projection(linear_layers, feature_list):
+def apply_PowerGPM_projection(linear_layers, feature_list):
     """
-    Applies continuous, multifractal soft gating to the gradients.
+    Applies a scale-aware, non-linear subspace projection. Rather than a flat,
+    scalar leakage ceiling, the attenuation factor decays smoothly along the
+    power-law spectrum of past activations.
 
     Args:
         linear_layers: A pre-cached list of nn.Linear modules.
-        feature_list: Pre-computed continuous protection operators P from update_MSG_bases.
-                      Each operator has shape [D_in, D_in].
+        feature_list: Persistent list containing (basis_tensor, leak_tensor) tuples.
     """
     if feature_list is None:
         return
@@ -426,12 +422,152 @@ def apply_MSG_projection(linear_layers, feature_list):
             if grad is None:
                 continue
 
-            # P is the pre-loaded GPU tensor operator matrix [D_in, D_in]
-            P = feature_list[i]
+            # Unpack your multi-scale spectral tuple
+            basis, leakage = feature_list[i]
+            # basis shape: (In_Features, Full_Rank)
+            # leakage shape: (Full_Rank)
 
-            # Attenuate the gradient components along protected axes:
-            # grad has shape [D_out, D_in], P has shape [D_in, D_in]
-            gated_grad = grad - torch.mm(grad, P)
+            # 1. Transform the gradient into your orthogonal coordinate basis
+            # Math: G_transformed = G @ B
+            grad_in_subspace = torch.mm(grad, basis)
 
-            # Update the gradient in-place
+            # 2. Apply scale-aware damping vector elements directly along the channels
+            # Multiplying by the leakage scales down coordinates matching macro spikes
+            # while leaving the high-ID background elements perfectly intact
+            gated_subspace_grad = grad_in_subspace * leakage
+
+            # 3. Project back out to standard parameter space
+            # Math: G_gated = G_orthogonal + (G_parallel * leak) => G @ (I - B @ diag(1-leak) @ B.T)
+            gated_grad = torch.mm(gated_subspace_grad, basis.t())
+
+            # Update the parameter gradient tensor in-place
             layer.weight.grad.copy_(gated_grad)
+
+
+def update_SparseGPM_bases(
+    model,
+    images,
+    global_threshold,
+    local_threshold=0.95,
+    feature_list=None,
+    activation_fn=torch.tanh,
+):
+    """Updates the task memory spaces using a cascading two-scale variance filter.
+
+    Args:
+        global_threshold: alpha_global (e.g., 0.97). SVD percentage for global
+          subspaces.
+        local_threshold: beta_local (e.g., 0.95). Target variance per singular
+          vector to isolate physical localized neurons.
+    """
+    model.eval()
+    with torch.no_grad():
+        reps = model.get_pre_activations(images)
+
+    # Flatten raw input images to 2D
+    flattened_images = images.view(images.size(0), -1)
+    all_inputs = [flattened_images]
+
+    for h in list(reps.values())[:-1]:
+        activated_h = activation_fn(h)
+        all_inputs.append(activated_h.view(h.size(0), -1))
+
+    if feature_list is None:
+        feature_list = [None] * len(all_inputs)
+
+    current_ranks = []
+    for i, activation in enumerate(all_inputs):
+        X = activation.cpu().numpy()
+        U, S, Vh = np.linalg.svd(X, full_matrices=False)
+
+        s_sq = S**2
+        s_sum = np.sum(s_sq)
+
+        # Stage 1: Global Subspace Selection (alpha_global)
+        cumulative_variance = np.cumsum(s_sq) / s_sum
+        k = np.argmax(cumulative_variance >= global_threshold) + 1
+        current_ranks.append(k)
+
+        # Extract the raw dense singular vectors: Shape (K, In_Features)
+        raw_basis_vectors = Vh[:k]
+
+        # Stage 2: Local Neuron Variance Filtering (beta_local)
+        sparse_basis_vectors = []
+        for v in raw_basis_vectors:
+            neuron_contributions = np.abs(v) ** 2
+
+            # Sort neurons by absolute squared intensity
+            sort_idx = np.argsort(neuron_contributions)[::-1]
+            sorted_contribs = neuron_contributions[sort_idx]
+
+            # Find minimum neurons to cross the local neuron variance target
+            cum_neuron_variance = np.cumsum(sorted_contribs)
+            num_neurons_kept = (
+                np.argmax(cum_neuron_variance >= local_threshold) + 1
+            )
+
+            # Mask out the un-selected multifractal background
+            keep_indices = sort_idx[:num_neurons_kept]
+            v_sparse = np.zeros_like(v)
+            v_sparse[keep_indices] = v[keep_indices]
+
+            # Critical: Re-normalize the sparse vector back to unit length
+            v_sparse_norm = np.linalg.norm(v_sparse)
+            if v_sparse_norm > 0:
+                v_sparse /= v_sparse_norm
+
+            sparse_basis_vectors.append(v_sparse)
+
+        # Stack back into a standard task basis matrix: Shape (In_Features, K)
+        task_basis = np.stack(sparse_basis_vectors, axis=0).T
+
+        if feature_list[i] is None:
+            feature_list[i] = task_basis
+        else:
+            # SVD-merge to ensure the cumulative historical basis stays orthogonal
+            old_basis = feature_list[i].cpu().numpy()
+            combined = np.concatenate((old_basis, task_basis), axis=1)
+            U_new, _, _ = np.linalg.svd(combined, full_matrices=False)
+            feature_list[i] = U_new[:, : min(combined.shape[0], combined.shape[1])]
+
+    device = next(model.parameters()).device
+    tensor_bases = [
+        (
+            torch.tensor(b, dtype=torch.float32, device=device)
+            if b is not None
+            else None
+        )
+        for b in feature_list
+    ]
+
+    return tensor_bases, current_ranks
+
+
+def apply_SparseGPM_projection(linear_layers, feature_list):
+    """Applies standard, clean orthogonal gradient projections.
+
+    Because the feature_list contains hyper-sparse basis coordinates from the
+    HT localization, this standard math automatically isolates parameter memory.
+    """
+    if feature_list is None:
+        return
+
+    with torch.no_grad():
+        for i, layer in enumerate(linear_layers):
+            if i >= len(feature_list) or feature_list[i] is None:
+                continue
+
+            grad = layer.weight.grad
+            if grad is None:
+                continue
+
+            basis = feature_list[i]  # Shape: (In_Features, K)
+
+            # Clean Standard GPM Math: G_parallel = G @ B @ B.T
+            parallel_grad = torch.mm(torch.mm(grad, basis), basis.t())
+
+            # G_projected = G - G_parallel
+            projected_grad = grad - parallel_grad
+
+            # In-place gradient update
+            layer.weight.grad.copy_(projected_grad)
