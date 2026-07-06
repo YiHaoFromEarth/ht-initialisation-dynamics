@@ -291,7 +291,7 @@ def build_research_model(model_input, model_params, ht_config, seed, device):
     if ht_config and ht_config.get("enabled"):
         print(f"Applying Heavy-Tailed Init (α={ht_config.get('alpha')})")
         model = apply_heavy_tailed_init(
-            model, ht_config["alpha"], ht_config["g"], base_seed=seed
+            model, ht_config["alpha"], ht_config["g"], seed=seed
         )
 
     return model.to(device)

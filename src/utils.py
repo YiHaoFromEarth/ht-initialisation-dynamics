@@ -253,7 +253,7 @@ def optimizer_factory(optimizer_class, model_params, **kwargs):
         return None
 
 
-def init_heavy_tailed(tensor, alpha, g, seed_offset=0, base_seed=0):
+def init_heavy_tailed(tensor, alpha, g, seed_offset=0, seed=0):
     """
     Overwrites a tensor's data with heavy-tailed weights using per-layer seeds.
     """
@@ -266,7 +266,7 @@ def init_heavy_tailed(tensor, alpha, g, seed_offset=0, base_seed=0):
 
         # 2. Localized Seed: ensures unique outlier placement per layer
         # This prevents correlated 'super-paths' through the network depth.
-        local_rng = np.random.RandomState(base_seed + seed_offset)
+        local_rng = np.random.RandomState(seed + seed_offset)
 
         # 3. Generate stable samples with the local RNG
         scale = g / (2 * n_eff) ** (1 / alpha)
@@ -278,11 +278,11 @@ def init_heavy_tailed(tensor, alpha, g, seed_offset=0, base_seed=0):
         tensor.copy_(torch.from_numpy(samples).float())
 
 
-def apply_heavy_tailed_init(model, alpha, g, base_seed=0):
+def apply_heavy_tailed_init(model, alpha, g, seed=0):
     """
     Scans a model and applies HT initialization to all weight tensors.
     """
-    print(f"Applying HT Init: alpha={alpha}, g={g}, seed={base_seed}")
+    print(f"Applying HT Init: alpha={alpha}, g={g}, seed={seed}")
     with torch.no_grad():
         # Dedicated counter ensures seed consistency across different model types
         weight_idx = 0
@@ -291,7 +291,7 @@ def apply_heavy_tailed_init(model, alpha, g, base_seed=0):
                 # Use Fan-in (input dimension) for more stable HT scaling
                 # n_eff = param.shape[1]
                 init_heavy_tailed(
-                    param, alpha, g, seed_offset=weight_idx, base_seed=base_seed
+                    param, alpha, g, seed_offset=weight_idx, seed=seed
                 )
                 weight_idx += 1
             elif "bias" in name:
