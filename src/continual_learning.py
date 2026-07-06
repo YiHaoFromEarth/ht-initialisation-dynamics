@@ -448,23 +448,15 @@ def update_SparseGPM_bases(
     model,
     images,
     global_threshold,
-    local_threshold=0.95,
+    local_threshold=1.0,
+    xi=0.0,
     feature_list=None,
     activation_fn=torch.tanh,
 ):
-    """Updates the task memory spaces using a cascading two-scale variance filter.
-
-    Args:
-        global_threshold: alpha_global (e.g., 0.97). SVD percentage for global
-          subspaces.
-        local_threshold: beta_local (e.g., 0.95). Target variance per singular
-          vector to isolate physical localized neurons.
-    """
     model.eval()
     with torch.no_grad():
         reps = model.get_pre_activations(images)
 
-    # Flatten raw input images to 2D
     flattened_images = images.view(images.size(0), -1)
     all_inputs = [flattened_images]
 
@@ -476,66 +468,129 @@ def update_SparseGPM_bases(
         feature_list = [None] * len(all_inputs)
 
     current_ranks = []
+
     for i, activation in enumerate(all_inputs):
-        X = activation.cpu().numpy()
-        U, S, Vh = np.linalg.svd(X, full_matrices=False)
+        # 1. Shape Transformation: (Samples, N_dim) -> (N_dim, Samples)
+        # Matches textbook GPM formulation: R_l = [x_1, x_2, ..., x_ns]
+        R = activation.cpu().numpy().T
+        N_dim = R.shape[0]
 
+        # Calculate total raw Frobenius norm variance of the incoming domain
+        total_variance_sq = np.sum(R ** 2)
+        if total_variance_sq < 1e-12:
+            current_ranks.append(0)
+            continue
+
+        # 2. EQUATION 8: RESIDUAL PROJECTION LAYER ELIMINATION
+        if feature_list[i] is not None:
+            old_basis = feature_list[i]
+            if torch.is_tensor(old_basis):
+                old_basis = old_basis.cpu().numpy()
+
+            # Project onto accumulated memory: R_proj = M @ (M.T @ R)
+            R_proj = old_basis @ (old_basis.T @ R)
+            # Isolate pure unexplained innovations: R_hat = R - R_proj
+            R_hat = R - R_proj
+            norm_projected_sq = np.sum(R_proj ** 2)
+        else:
+            R_hat = R
+            old_basis = None
+            norm_projected_sq = 0.0
+
+        # 3. EQUATION 9: SVD ON ISOLATED RESIDUAL COMPONENT
+        U, S, Vh = np.linalg.svd(R_hat, full_matrices=False)
         s_sq = S**2
-        s_sum = np.sum(s_sq)
 
-        # Stage 1: Global Subspace Selection (alpha_global)
-        cumulative_variance = np.cumsum(s_sq) / s_sum
-        k = np.argmax(cumulative_variance >= global_threshold) + 1
+        # Compute minimum rank 'k' accounting for historical compensation
+        # ||R_proj||^2 + ||(R_hat)_k||^2 >= epsilon_th * ||R||^2
+        cumulative_residual_variance = np.cumsum(s_sq)
+        total_accounted_variance = norm_projected_sq + cumulative_residual_variance
+
+        target_energy = global_threshold * total_variance_sq
+
+        # Determine if old tasks already fully satisfy the threshold requirements
+        if norm_projected_sq >= target_energy:
+            k = 0
+        else:
+            k = np.argmax(total_accounted_variance >= target_energy) + 1
+
         current_ranks.append(k)
 
-        # Extract the raw dense singular vectors: Shape (K, In_Features)
-        raw_basis_vectors = Vh[:k]
+        if k == 0:
+            # No new structural directions found; maintain current matrix
+            continue
 
-        # Stage 2: Local Neuron Variance Filtering (beta_local)
-        sparse_basis_vectors = []
-        for v in raw_basis_vectors:
-            neuron_contributions = np.abs(v) ** 2
+        # Extract left singular vectors spanning the newly discovered innovation space
+        raw_basis_vectors = U[:, :k]  # Shape: (N_dim, k)
 
-            # Sort neurons by absolute squared intensity
-            sort_idx = np.argsort(neuron_contributions)[::-1]
-            sorted_contribs = neuron_contributions[sort_idx]
+        # 4. SPARSE ENVELOPE INTERCEPTION (SparseGPM Variant Condition)
+        if local_threshold >= 1.0:
+            # Faithful GPM Baseline Path
+            task_basis = raw_basis_vectors
+        else:
+            # Custom Heavy-Tailed Pruning Matrix Operations
+            if xi > 0:
+                norms = np.linalg.norm(R_hat, axis=1, keepdims=True)
+                norms[norms == 0] = 1e-9
+                R_normalized = R_hat / norms
 
-            # Find minimum neurons to cross the local neuron variance target
-            cum_neuron_variance = np.cumsum(sorted_contribs)
-            num_neurons_kept = (
-                np.argmax(cum_neuron_variance >= local_threshold) + 1
-            )
+                cosine_similarity = R_normalized @ R_normalized.T
+                cosine_distance = 1.0 - np.abs(cosine_similarity)
+                cosine_distance = np.nan_to_num(cosine_distance, nan=0.0)
 
-            # Mask out the un-selected multifractal background
-            keep_indices = sort_idx[:num_neurons_kept]
-            v_sparse = np.zeros_like(v)
-            v_sparse[keep_indices] = v[keep_indices]
+            sparse_basis_columns = []
+            # Iterate through individual column basis vectors to identify local hubs
+            for col_idx in range(k):
+                v = raw_basis_vectors[:, col_idx]
+                neuron_contributions = np.abs(v) ** 2
 
-            # Critical: Re-normalize the sparse vector back to unit length
-            v_sparse_norm = np.linalg.norm(v_sparse)
-            if v_sparse_norm > 0:
-                v_sparse /= v_sparse_norm
+                sort_idx = np.argsort(neuron_contributions)[::-1]
+                sorted_contribs = neuron_contributions[sort_idx]
 
-            sparse_basis_vectors.append(v_sparse)
+                cum_neuron_variance = np.cumsum(sorted_contribs)
+                num_neurons_kept = np.argmax(cum_neuron_variance >= local_threshold) + 1
+                keep_indices = sort_idx[:num_neurons_kept]
 
-        # Stack back into a standard task basis matrix: Shape (In_Features, K)
-        task_basis = np.stack(sparse_basis_vectors, axis=0).T
+                if xi > 0:
+                    soft_mask = np.zeros(N_dim)
+                    for hub in keep_indices:
+                        d_from_hub = cosine_distance[hub, :]
+                        envelope = (1.0 + d_from_hub / xi) ** (-1.0)
+                        soft_mask = np.maximum(soft_mask, envelope)
+                    v_processed = v * soft_mask
+                else:
+                    v_processed = np.zeros_like(v)
+                    v_processed[keep_indices] = v[keep_indices]
 
-        if feature_list[i] is None:
+                v_norm = np.linalg.norm(v_processed)
+                if v_norm > 0:
+                    v_processed /= v_norm
+                sparse_basis_columns.append(v_processed)
+
+            task_basis = np.stack(sparse_basis_columns, axis=1)
+
+            # Re-orthogonalize modified entries via QR Decomposition
+            if task_basis.shape[1] > 0:
+                Q, R_qr = np.linalg.qr(task_basis)
+                d_diag = np.diag(R_qr)
+                ph = d_diag / (np.abs(d_diag) + 1e-12)
+                task_basis = Q * ph
+
+        # 5. LINE 21: DIRECT COLUMN APPENDING (NO JOINT RESAMPLING)
+        if old_basis is None:
             feature_list[i] = task_basis
         else:
-            # SVD-merge to ensure the cumulative historical basis stays orthogonal
-            old_basis = feature_list[i].cpu().numpy()
-            combined = np.concatenate((old_basis, task_basis), axis=1)
-            U_new, _, _ = np.linalg.svd(combined, full_matrices=False)
-            feature_list[i] = U_new[:, : min(combined.shape[0], combined.shape[1])]
+            if task_basis.shape[1] > 0:
+                # Direct structural column concatenation as dictated by GPM paper
+                feature_list[i] = np.concatenate((old_basis, task_basis), axis=1)
 
+    # Convert memory registers back to runtime PyTorch tensors
     device = next(model.parameters()).device
     tensor_bases = [
         (
             torch.tensor(b, dtype=torch.float32, device=device)
-            if b is not None
-            else None
+            if b is not None and not torch.is_tensor(b)
+            else b
         )
         for b in feature_list
     ]
