@@ -598,6 +598,180 @@ def update_SparseGPM_bases(
     return tensor_bases, current_ranks
 
 
+def update_HTGPM_bases(
+    model,
+    images,
+    global_threshold,
+    alpha=1.2,          # Tail index matching the heavy-tailed initialization
+    eta=1e-3,           # Regularization parameter for Resolvent edge shifting
+    feature_list=None,
+    activation_fn=torch.tanh,
+):
+    model.eval()
+    with torch.no_grad():
+        reps = model.get_pre_activations(images)
+
+    flattened_images = images.view(images.size(0), -1)
+    all_inputs = [flattened_images]
+
+    for h in list(reps.values())[:-1]:
+        activated_h = activation_fn(h)
+        all_inputs.append(activated_h.view(h.size(0), -1))
+
+    if feature_list is None:
+        feature_list = [None] * len(all_inputs)
+
+    current_ranks = []
+
+    for i, activation in enumerate(all_inputs):
+        # 1. Shape Transformation: (Samples, N_dim) -> (N_dim, Samples)
+        # R_l = [x_1, x_2, ..., x_ns] as formulated in classical GPM
+        R = activation.cpu().numpy().T
+        N_dim = R.shape[0]
+
+        # Calculate total raw Frobenius norm variance of the incoming domain
+        total_variance_sq = np.sum(R ** 2)
+        if total_variance_sq < 1e-12:
+            current_ranks.append(0)
+            continue
+
+        # 2. RESIDUAL PROJECTION LAYER ELIMINATION
+        if feature_list[i] is not None:
+            old_basis = feature_list[i]
+            if torch.is_tensor(old_basis):
+                old_basis = old_basis.cpu().numpy()
+
+            # Project onto accumulated memory: R_proj = M @ (M.T @ R)
+            R_proj = old_basis @ (old_basis.T @ R)
+            # Isolate pure unexplained innovations
+            R_hat = R - R_proj
+            norm_projected_sq = np.sum(R_proj ** 2)
+        else:
+            R_hat = R
+            old_basis = None
+            norm_projected_sq = 0.0
+
+        # 3. SVD ON ISOLATED RESIDUAL COMPONENT
+        U, S, Vh = np.linalg.svd(R_hat, full_matrices=False)
+        s_sq = S**2
+
+        # Compute minimum rank 'k' accounting for historical compensation
+        # ||R_proj||^2 + ||(R_hat)_k||^2 >= epsilon_th * ||R||^2
+        cumulative_residual_variance = np.cumsum(s_sq)
+        total_accounted_variance = norm_projected_sq + cumulative_residual_variance
+
+        target_energy = global_threshold * total_variance_sq
+
+        # Determine if old tasks already fully satisfy the threshold requirements
+        if norm_projected_sq >= target_energy:
+            k = 0
+        else:
+            k = np.argmax(total_accounted_variance >= target_energy) + 1
+
+        current_ranks.append(k)
+
+        if k == 0:
+            # No new structural directions found; maintain current matrix states
+            continue
+
+        # Extract left singular vectors spanning the newly discovered innovation space
+        raw_basis_vectors = U[:, :k]  # Shape: (N_dim, k)
+
+        # =====================================================================
+        # 4. HEAVY-TAILED RANDOM MATRIX THEORY OPERATOR ASSEMBLY (HTGPM)
+        # =====================================================================
+
+        # A. Construct the Empirical Matrix Operator and find its spectral edge
+        A = R_hat @ R_hat.T
+        eigenvalues = np.linalg.eigvalsh(A)
+        lambda_max = eigenvalues[-1]
+
+        # B. Compute the Complex-Shifted Resolvent Matrix: G(z) = (A - zI)^-1
+        z = lambda_max + 1j * eta
+        Resolvent = np.linalg.inv(A - z * np.eye(N_dim))
+        resolvent_envelope_matrix = np.abs(Resolvent)
+
+        # C. Transform Resolvent entries into a stable RMT Distance Topology (0 to 1)
+        # Uses Cauchy-Schwarz style spatial normalization to eliminate magnitude biases
+        diag_G = np.diagonal(resolvent_envelope_matrix)
+        normalization_matrix = np.sqrt(np.outer(diag_G, diag_G))
+        rmt_similarity = resolvent_envelope_matrix / (normalization_matrix + 1e-9)
+        rmt_distance_matrix = 1.0 - rmt_similarity
+
+        # D. Mask Processing Loop
+        sparse_basis_columns = []
+        xi_resolvent = alpha   # Localization length matches tail index
+        eta_resolvent = alpha  # Algebraic decay matches stable density index
+
+        for col_idx in range(k):
+            v = raw_basis_vectors[:, col_idx]
+            v = v / (np.linalg.norm(v) + 1e-12) # Strict vector normalization
+
+            # Diagnostic Gatekeeper: Compute Inverse Participation Ratio (4th power)
+            ipr_val = np.sum(v ** 4)
+            # Safe boundary constraint: ceiling target calculation
+            effective_hubs_count = int(np.ceil(1.0 / ipr_val))
+
+            # Isolate physical hub locations using energy rank (2nd power)
+            neuron_contributions = np.abs(v) ** 2
+            sort_idx = np.argsort(neuron_contributions)[::-1]
+            rmt_hub_indices = sort_idx[:effective_hubs_count]
+
+            # Apply alpha-parameterized continuous Power-Law decay around hubs
+            soft_mask = np.zeros(N_dim)
+            for hub in rmt_hub_indices:
+                d_from_hub = rmt_distance_matrix[hub, :]
+
+                # Power-law profile matching heavy-tailed statistics
+                envelope = (1.0 + d_from_hub / xi_resolvent) ** (-eta_resolvent)
+
+                # Constructive structural masking over multiple anchors
+                soft_mask = np.maximum(soft_mask, envelope)
+
+            # Bounding enforcement
+            if np.max(soft_mask) > 0:
+                soft_mask /= np.max(soft_mask)
+
+            # Intercept basis geometry using the RMT soft envelope
+            v_processed = v * soft_mask
+
+            # Restore unit normal orientation to maintain projection integrity
+            v_norm = np.linalg.norm(v_processed)
+            if v_norm > 0:
+                v_processed /= v_norm
+
+            sparse_basis_columns.append(v_processed)
+
+        task_basis = np.stack(sparse_basis_columns, axis=1)
+
+        # Re-orthogonalize modified entries via clean QR Decomposition
+        if task_basis.shape[1] > 0:
+            Q, R_qr = np.linalg.qr(task_basis)
+            d_diag = np.diag(R_qr)
+            ph = d_diag / (np.abs(d_diag) + 1e-12)
+            task_basis = Q * ph
+
+        # 5. DIRECT COLUMN APPENDING TO ACCUMULATED MEMORY
+        if old_basis is None:
+            feature_list[i] = task_basis
+        else:
+            if task_basis.shape[1] > 0:
+                feature_list[i] = np.concatenate((old_basis, task_basis), axis=1)
+
+    # Convert memory registers back to runtime PyTorch tensors
+    device = next(model.parameters()).device
+    tensor_bases = [
+        (
+            torch.tensor(b, dtype=torch.float32, device=device)
+            if b is not None and not torch.is_tensor(b)
+            else b
+        )
+        for b in feature_list
+    ]
+
+    return tensor_bases, current_ranks
+
+
 def apply_SparseGPM_projection(linear_layers, feature_list):
     """Applies standard, clean orthogonal gradient projections.
 

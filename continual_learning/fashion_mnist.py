@@ -135,7 +135,7 @@ for seed in seeds:
         model = GeneralMLP(784, hidden_size, 10, depth, activation_name, bias=bias).to(
             device
         )
-        apply_heavy_tailed_init(model, alpha=alpha, g=g, base_seed=seed)
+        apply_heavy_tailed_init(model, alpha=alpha, g=g, seed=seed)
 
         # 1. CACHE THE LAYERS ONCE
         linear_layers = [m for m in model.modules() if isinstance(m, nn.Linear)]
