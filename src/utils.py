@@ -253,9 +253,10 @@ def optimizer_factory(optimizer_class, model_params, **kwargs):
         return None
 
 
-def init_heavy_tailed(tensor, alpha, g, seed_offset=0, seed=0):
+def init_heavy_tailed(tensor, alpha, g, seed_offset=0, seed=0, cutoff_bound=None):
     """
-    Overwrites a tensor's data with heavy-tailed weights using per-layer seeds.
+    Overwrites a tensor's data with heavy-tailed weights using per-layer seeds,
+    with an optional upper bound for truncation.
     """
     with torch.no_grad():
         # 1. Calculate the effective N based on tensor shape
@@ -265,7 +266,6 @@ def init_heavy_tailed(tensor, alpha, g, seed_offset=0, seed=0):
             n_eff = (tensor.shape[0] * tensor.shape[1]) ** 0.5
 
         # 2. Localized Seed: ensures unique outlier placement per layer
-        # This prevents correlated 'super-paths' through the network depth.
         local_rng = np.random.RandomState(seed + seed_offset)
 
         # 3. Generate stable samples with the local RNG
@@ -274,11 +274,15 @@ def init_heavy_tailed(tensor, alpha, g, seed_offset=0, seed=0):
             alpha, 0, scale=scale, size=tensor.shape, random_state=local_rng
         )
 
+        # 3.5. Enforce the mathematical firewall if specified
+        if cutoff_bound is not None:
+            samples = np.clip(samples, -cutoff_bound, cutoff_bound)
+
         # 4. Copy to PyTorch
         tensor.copy_(torch.from_numpy(samples).float())
 
 
-def apply_heavy_tailed_init(model, alpha, g, seed=0):
+def apply_heavy_tailed_init(model, alpha, g, seed=0, cutoff_bound=None):
     """
     Scans a model and applies HT initialization to all weight tensors.
     """
@@ -291,7 +295,7 @@ def apply_heavy_tailed_init(model, alpha, g, seed=0):
                 # Use Fan-in (input dimension) for more stable HT scaling
                 # n_eff = param.shape[1]
                 init_heavy_tailed(
-                    param, alpha, g, seed_offset=weight_idx, seed=seed
+                    param, alpha, g, seed_offset=weight_idx, seed=seed, cutoff_bound=cutoff_bound
                 )
                 weight_idx += 1
             elif "bias" in name:
