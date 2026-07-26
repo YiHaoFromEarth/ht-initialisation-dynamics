@@ -1,10 +1,9 @@
-from xml.parsers.expat import model
-
-import torch
-import numpy as np
-import torch.nn as nn
-import torch.nn.functional as F
 import copy
+
+import numpy as np
+import torch
+import torch.nn.functional as F
+from torch import nn
 
 
 class EWC:
@@ -64,7 +63,7 @@ class EWC:
         loss = 0
         for n, p in model.named_parameters():
             # Sum penalties across all previous tasks
-            for task_key in self._means.keys():
+            for task_key in self._means:
                 if n in task_key:
                     _precision = self._precision_matrices[task_key]
                     _mean = self._means[task_key]
@@ -138,7 +137,7 @@ class SAM(torch.optim.Optimizer):
     def __init__(self, params, base_optimizer, rho=0.05, **kwargs):
         assert rho >= 0.0, f"Invalid rho, should be non-negative: {rho}"
         defaults = dict(rho=rho, **kwargs)
-        super(SAM, self).__init__(params, defaults)
+        super().__init__(params, defaults)
         self.base_optimizer = base_optimizer(self.param_groups, **kwargs)
         self.param_groups = self.base_optimizer.param_groups
 

@@ -1,22 +1,23 @@
-import torch
-import torch.nn as nn
-import torch.optim as optim
-import yaml
-import sys
-import random
-import numpy as np
-import logging
-import json
-import pandas as pd
-import re
-import os
 import glob
+import json
+import logging
+import os
+import random
+import re
+import sys
+from copy import deepcopy
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+import torch
+import yaml
+from scipy.stats import levy_stable
+from torch import nn, optim
 from torch.utils.data import DataLoader, TensorDataset
 from torchvision import datasets, transforms
+
 from . import architectures
-from scipy.stats import levy_stable
-from pathlib import Path
-from copy import deepcopy
 
 
 class HookManager:

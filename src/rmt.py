@@ -1,16 +1,17 @@
 """This section contains contains functions for random matrix theory (RMT) analysis. Adapted from 10.1103/PhysRevE.106.054124"""
-from typing import List, Tuple, Any, Union
+
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-
-from numba import jit, prange
-from scipy.special import erf
-from scipy.optimize import curve_fit
-import scipy.stats
 from functools import partial
-import powerlaw
-from tqdm import tqdm
+from typing import Any, List, Tuple, Union
+
 import numpy as np
+import powerlaw
+import scipy.stats
+from numba import jit, prange
+from scipy.optimize import curve_fit
+from scipy.special import erf
+from tqdm import tqdm
 
 """Spectra broadening"""
 

@@ -1,5 +1,5 @@
-import torch.nn as nn
 import torch
+from torch import nn
 
 
 class GeneralMLP(nn.Module):
@@ -13,7 +13,7 @@ class GeneralMLP(nn.Module):
         bias=True,
         dropout_p=0.0,
     ):
-        super(GeneralMLP, self).__init__()
+        super().__init__()
 
         # Mapping string to PyTorch activation modules
         activations = {"tanh": nn.Tanh, "relu": nn.ReLU, "sigmoid": nn.Sigmoid}
@@ -54,8 +54,6 @@ class GeneralMLP(nn.Module):
     def get_pre_activations(self, x):
         """
         Captures the pre-activation input (h) for every linear layer.
-        Essential for verifying the extended critical regime and
-        calculating Jacobian spectral densities.
         """
         x = x.view(x.size(0), -1)
         pre_activations = {}
@@ -76,6 +74,30 @@ class GeneralMLP(nn.Module):
 
         return pre_activations
 
+    def get_layer_inputs(self, x):
+        """
+        Captures the input representation matrix (x) fed INTO every linear layer.
+        Essential for GPM basis construction where basis space must match D_in.
+        """
+        x = x.view(x.size(0), -1)
+        layer_inputs = {}
+        current_x = x
+
+        linear_idx = 0
+        for module in self.features:
+            if isinstance(module, nn.Linear):
+                # Store the incoming input (Layer 0 receives raw image, Layer 1+ receives Tanh outputs)
+                layer_inputs[linear_idx] = current_x.detach()
+                linear_idx += 1
+                current_x = module(current_x)
+            else:
+                # Pass through non-linearities (nn.Tanh, nn.ReLU, etc.)
+                current_x = module(current_x)
+
+        # Capture the input fed into the classifier
+        layer_inputs["classifier"] = current_x.detach()
+        return layer_inputs
+
 
 class GeneralCNN(nn.Module):
     def __init__(
@@ -88,7 +110,7 @@ class GeneralCNN(nn.Module):
         dropout_p=0.5,
         bias=False,
     ):
-        super(GeneralCNN, self).__init__()
+        super().__init__()
 
         # 1. Setup Activations
         activations = {"tanh": nn.Tanh, "relu": nn.ReLU, "sigmoid": nn.Sigmoid}
@@ -136,7 +158,7 @@ class GeneralCNN(nn.Module):
 class ResearchCNN(GeneralCNN):
     def __init__(self, *args, **kwargs):
         # 1. Initialize the parent exactly as defined
-        super(ResearchCNN, self).__init__(*args, **kwargs)
+        super().__init__(*args, **kwargs)
 
         # Surgical Strike: Filter out only the VERY LAST MaxPool2d
         all_layers = list(self.features.children())

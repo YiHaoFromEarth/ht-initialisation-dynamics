@@ -1,27 +1,30 @@
-import torch
-import torch.nn as nn
-import numpy as np
 import copy
-import pandas as pd
+import gc
 import json
 import re
-import gc
-import dcor
-from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor
-from tqdm import tqdm
+from pathlib import Path
+
+import dcor
+import numpy as np
+import pandas as pd
+import torch
 from scipy.stats import spearmanr
-from .rmt import fit_marcenkoPastur
+from torch import nn
+from tqdm import tqdm
+
 from .equations import mcculloch_estimator
+from .rmt import fit_marcenkoPastur
 from .utils import (
-    load_master_config,
+    apply_spectral_filter_to_model,
+    evaluate_model,
     get_dataset_class,
     get_transform,
     get_universal_loader,
+    load_master_config,
     model_factory,
-    apply_spectral_filter_to_model,
-    evaluate_model,
 )
+
 
 class ModelTracker:
     def __init__(self, model, lags=[1, 2, 4, 8, 16, 32, 64, 128]):
@@ -35,12 +38,14 @@ class ModelTracker:
         for name, p in model.named_parameters():
             if p.requires_grad:
                 num_params = p.numel()
-                self.param_metadata.append({
-                    "name": name,
-                    "start": start_idx,
-                    "end": start_idx + num_params,
-                    "shape": p.shape,
-                })
+                self.param_metadata.append(
+                    {
+                        "name": name,
+                        "start": start_idx,
+                        "end": start_idx + num_params,
+                        "shape": p.shape,
+                    }
+                )
                 start_idx += num_params
 
         self.sizes = [m["end"] - m["start"] for m in self.param_metadata]
@@ -51,7 +56,9 @@ class ModelTracker:
         self.device = next(model.parameters()).device
 
         # 2. TENSOR BUFFER SETUP
-        self.history_buffer = torch.zeros((self.max_lag + 1, total_params), device=self.device)
+        self.history_buffer = torch.zeros(
+            (self.max_lag + 1, total_params), device=self.device
+        )
         self.history_filled = 0
         self.cursor = 0
 
@@ -61,7 +68,9 @@ class ModelTracker:
     @torch.no_grad()
     def update(self, model, flat_grads=None):
         # 1. Capture current state (Avoid creating detached views, just read flat)
-        current_flat = torch.cat([p.view(-1) for p in model.parameters() if p.requires_grad])
+        current_flat = torch.cat(
+            [p.view(-1) for p in model.parameters() if p.requires_grad]
+        )
 
         self.history_buffer[self.cursor] = current_flat
         current_idx = self.cursor
@@ -77,7 +86,9 @@ class ModelTracker:
 
         if num_valid == 0:
             # Pad with zeros if no lags are ready
-            self.results_buffer.append(torch.zeros((self.num_lags, self.num_layers, 7), device=self.device))
+            self.results_buffer.append(
+                torch.zeros((self.num_lags, self.num_layers, 7), device=self.device)
+            )
             return
 
         # Handle Gradients
@@ -104,7 +115,9 @@ class ModelTracker:
         linfs_list, cos_dists_list, snrs_list, align_list = [], [], [], []
 
         # 4. Compute Metrics per layer (Loops `L` times instead of `L * Lags` times)
-        for l_idx, (d, c, p, c_norm) in enumerate(zip(d_layers, c_layers, p_layers, c_norms)):
+        for l_idx, (d, c, p, c_norm) in enumerate(
+            zip(d_layers, c_layers, p_layers, c_norms)
+        ):
             # d is shape (num_valid, layer_size)
             nets_list.append(d.mean(dim=1))
             abs_means_list.append(d.abs().mean(dim=1))
@@ -131,19 +144,24 @@ class ModelTracker:
                 align_list.append(torch.zeros(num_valid, device=self.device))
 
         # Stack the results into a single matrix of shape (num_valid, num_layers, 7)
-        metrics = torch.stack([
-            torch.stack(nets_list, dim=1),
-            torch.stack(abs_means_list, dim=1),
-            torch.stack(rmss_list, dim=1),
-            torch.stack(linfs_list, dim=1),
-            torch.stack(cos_dists_list, dim=1),
-            torch.stack(snrs_list, dim=1),
-            torch.stack(align_list, dim=1)
-        ], dim=2)
+        metrics = torch.stack(
+            [
+                torch.stack(nets_list, dim=1),
+                torch.stack(abs_means_list, dim=1),
+                torch.stack(rmss_list, dim=1),
+                torch.stack(linfs_list, dim=1),
+                torch.stack(cos_dists_list, dim=1),
+                torch.stack(snrs_list, dim=1),
+                torch.stack(align_list, dim=1),
+            ],
+            dim=2,
+        )
 
         # Pad remaining invalid lags with zeros to maintain strict (num_lags, num_layers, 7) shape
         if num_valid < self.num_lags:
-            pad = torch.zeros((self.num_lags - num_valid, self.num_layers, 7), device=self.device)
+            pad = torch.zeros(
+                (self.num_lags - num_valid, self.num_layers, 7), device=self.device
+            )
             metrics = torch.cat([metrics, pad], dim=0)
 
         # 5. Append to GPU buffer
@@ -172,21 +190,23 @@ class ModelTracker:
         # Apply your logic: Only log if step_idx >= tau
         mask = steps_flat >= lags_flat
 
-        return pd.DataFrame({
-            "alpha_init": alpha,
-            "sigma_init": sigma,
-            "seed": seed,
-            "layer": layers_flat[mask],
-            "time_lag": (lags_flat[mask] * scale).astype(int),
-            "step": ((steps_flat[mask] + 1 - (lags_flat[mask] // 2)) * scale),
-            "net_drift": data_flat[mask, 0],
-            "abs_mean_dist": data_flat[mask, 1],
-            "rms_dist": data_flat[mask, 2],
-            "l_inf_dist": data_flat[mask, 3],
-            "cos_dist": data_flat[mask, 4],
-            "snr": data_flat[mask, 5],
-            "grad_weight_alignment": data_flat[mask, 6],
-        })
+        return pd.DataFrame(
+            {
+                "alpha_init": alpha,
+                "sigma_init": sigma,
+                "seed": seed,
+                "layer": layers_flat[mask],
+                "time_lag": (lags_flat[mask] * scale).astype(int),
+                "step": ((steps_flat[mask] + 1 - (lags_flat[mask] // 2)) * scale),
+                "net_drift": data_flat[mask, 0],
+                "abs_mean_dist": data_flat[mask, 1],
+                "rms_dist": data_flat[mask, 2],
+                "l_inf_dist": data_flat[mask, 3],
+                "cos_dist": data_flat[mask, 4],
+                "snr": data_flat[mask, 5],
+                "grad_weight_alignment": data_flat[mask, 6],
+            }
+        )
 
 
 def get_layer_fingerprint(W, W0):
@@ -414,16 +434,15 @@ def aggregate_displacement_sweep(
 
         # 6. Save with high compression
         master_df.to_parquet(
-            output_name,
-            engine="pyarrow",
-            compression="zstd",
-            index=False
+            output_name, engine="pyarrow", compression="zstd", index=False
         )
 
         print("--- SUCCESS ---")
         print(f"Master database saved to: {output_name}")
         print(f"Total Rows: {len(master_df):,}")
-        print(f"Memory Usage: {master_df.memory_usage(deep=True).sum() / 1024**2:.2f} MB")
+        print(
+            f"Memory Usage: {master_df.memory_usage(deep=True).sum() / 1024**2:.2f} MB"
+        )
 
         return master_df
     else:

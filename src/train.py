@@ -1,23 +1,25 @@
-import torch
-import torch.nn as nn
-import pandas as pd
+import itertools
 import json
 import sys
-import itertools
-import yaml
 from datetime import datetime
-from torchinfo import summary
 from pathlib import Path
+
+import pandas as pd
+import torch
+import yaml
+from torch import nn
+from torchinfo import summary
 from tqdm import tqdm
+
 from .analysis import ModelTracker
 from .utils import (
-    model_factory,
-    set_seed,
-    optimizer_factory,
-    apply_heavy_tailed_init,
-    setup_experiment,
-    evaluate_model,
     TeeLogger,
+    apply_heavy_tailed_init,
+    evaluate_model,
+    model_factory,
+    optimizer_factory,
+    set_seed,
+    setup_experiment,
 )
 
 
