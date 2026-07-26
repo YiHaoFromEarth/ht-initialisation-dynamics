@@ -1,0 +1,32 @@
+[workspace]
+authors = ["Yi Hao <145820376+YiHaoFromEarth@users.noreply.github.com>"]
+channels = ["conda-forge"]
+name = "honours"
+platforms = [{ platform = "linux-64", cuda = "12.4" }]
+version = "0.1.0"
+
+[tasks]
+
+[dependencies]
+python = "3.12.*"
+pytorch-gpu = "*"
+scipy = "*"
+pandas = "*"
+tqdm = "*"
+jupyterlab = "*"
+matplotlib = "*"
+seaborn = "*"
+torchinfo = "*"
+umap-learn = "*"
+ipympl = "*"
+scikit-learn = "*"
+ipykernel = ">=7.3.0,<8"
+torchvision = ">=0.28.0,<0.29"
+dcor = ">=0.7,<0.8"
+nbstripout = ">=0.9.1,<0.10"
+
+[pypi-dependencies]
+scikit-dimension = "*"
+pyarrow = "*"
+powerlaw = "*"
+vulture = "*"

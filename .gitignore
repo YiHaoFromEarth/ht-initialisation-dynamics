@@ -247,10 +247,11 @@ old_results/
 
 # Misc
 .rsync-exclude
-thesis/thesis.pdf
-research_plan/research_plan.pdf
-tamsd_results.json
 *.pbs
 *.sh
 **/checkpoints
 *.parquet
+
+# pixi environments
+.pixi/*
+!.pixi/config.toml
