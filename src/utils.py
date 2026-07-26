@@ -295,7 +295,12 @@ def apply_heavy_tailed_init(model, alpha, g, seed=0, cutoff_bound=None):
                 # Use Fan-in (input dimension) for more stable HT scaling
                 # n_eff = param.shape[1]
                 init_heavy_tailed(
-                    param, alpha, g, seed_offset=weight_idx, seed=seed, cutoff_bound=cutoff_bound
+                    param,
+                    alpha,
+                    g,
+                    seed_offset=weight_idx,
+                    seed=seed,
+                    cutoff_bound=cutoff_bound,
                 )
                 weight_idx += 1
             elif "bias" in name:

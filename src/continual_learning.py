@@ -184,619 +184,357 @@ class SAM(torch.optim.Optimizer):
         return norm
 
 
-def spectral_norm_with_gain(module, gain=1.2, name="weight", n_power_iterations=1):
-    SpectralNormGain.apply(module, name, n_power_iterations, gain)
-    return module
-
-
-def update_GPM_bases(model, images, threshold, feature_list=None, activation_fn=torch.tanh):
-    model.eval()
-    with torch.no_grad():
-        reps = model.get_pre_activations(images)
-
-    # FIX: Explicitly flatten the raw images to 2D (Batch, 784)
-    flattened_images = images.view(images.size(0), -1)
-    all_inputs = [flattened_images]
-
-    for h in list(reps.values())[:-1]:
-        # Hidden activations from nn.Linear are already 2D, but we ensure it
-        activated_h = activation_fn(h)
-        all_inputs.append(activated_h.view(h.size(0), -1))
-
-    if feature_list is None:
-        feature_list = [None] * len(all_inputs)
-
-    current_ranks = []
-    for i, activation in enumerate(all_inputs):
-        X = activation.cpu().numpy()
-        U, S, Vh = np.linalg.svd(X, full_matrices=False)
-
-        s_sq = S**2
-        s_sum = np.sum(s_sq)
-
-        # Vectorized threshold calculation (cleaner than the manual loop)
-        cumulative_variance = np.cumsum(s_sq) / s_sum
-        k = np.argmax(cumulative_variance >= threshold) + 1
-        current_ranks.append(k)  # Store k for logging
-
-        task_basis = Vh[:k].T
-
-        if feature_list[i] is None:
-            feature_list[i] = task_basis
-        else:
-            # We must bring the existing GPU tensor back to CPU numpy for the SVD merge
-            old_basis = feature_list[i].cpu().numpy()
-            combined = np.concatenate((old_basis, task_basis), axis=1)
-            U_new, _, _ = np.linalg.svd(combined, full_matrices=False)
-            feature_list[i] = U_new[:, : min(combined.shape[0], combined.shape[1])]
-
-    # CRITICAL: Pre-load the bases to the GPU here, NOT in the training loop
-    device = next(model.parameters()).device
-    tensor_bases = [
-        torch.tensor(b, dtype=torch.float32, device=device) if b is not None else None
-        for b in feature_list
-    ]
-
-    return tensor_bases, current_ranks
-
-
-def apply_GPM_projection(linear_layers, feature_list, ema_buffers, alpha=0.01,
-                         use_gating=True, beta=0.99, tau=0.01):
-    """
-    Applies an asymmetric directional gate to Leaky GPM regulated by an
-    Exponential Moving Average (EMA) and custom noise-floor threshold.
-
-    Args:
-        linear_layers: A pre-cached list of nn.Linear modules.
-        feature_list: The pre-loaded GPU tensors of basis matrices.
-        ema_buffers: Persistent dictionary tracking the historical alignment per layer.
-        alpha: Maximum permitted leakage factor for cooperative steps.
-        use_gating: Boolean flag to toggle the temporal gating protection.
-        beta: Momentum factor for the EMA tracking corridor (low-pass filter).
-        tau: Gating threshold parameter to cut through the background noise floor.
-    """
-    if feature_list is None:
-        return
-
-    with torch.no_grad():
-        for i, layer in enumerate(linear_layers):
-            if i >= len(feature_list) or feature_list[i] is None:
-                continue
-
-            grad = layer.weight.grad
-            if grad is None:
-                continue
-
-            basis = feature_list[i]  # Shape: (In_Features, K)
-            layer_key = f'layer_{i}'
-
-            # 1. Isolate the parallel component (the projection onto past subspace)
-            # Math: g_parallel = g @ B @ B.T
-            parallel_grad = torch.mm(torch.mm(grad, basis), basis.t())
-
-            # 2. Isolate the orthogonal component
-            # Math: g_orthogonal = g - g_parallel
-            ortho_grad = grad - parallel_grad
-
-            # 3. Compute Directional Gating Logic
-            effective_alpha = alpha
-
-            if use_gating:
-                # Isolate the current weight landscape inside the same past subspace
-                parallel_weight = torch.mm(torch.mm(layer.weight, basis), basis.t())
-
-                # Compute the true Frobenius Inner Product (Matrix Dot Product)
-                dot_product = torch.sum(parallel_grad * parallel_weight).item()
-
-                # Calculate normalized Frobenius cosine similarity (-1.0 to +1.0)
-                p_grad_norm = torch.linalg.norm(parallel_grad).item()
-                p_weight_norm = torch.linalg.norm(parallel_weight).item()
-
-                current_raw_alignment = 0.0
-                if p_grad_norm > 0 and p_weight_norm > 0:
-                    current_raw_alignment = dot_product / (p_grad_norm * p_weight_norm)
-
-                # Update the temporal moving average buffer
-                if layer_key not in ema_buffers:
-                    ema_buffers[layer_key] = current_raw_alignment
-                else:
-                    ema_buffers[layer_key] = (beta * ema_buffers[layer_key]) + ((1.0 - beta) * current_raw_alignment)
-
-                # The gate now requires the historical trend line to clear the custom floor tau
-                if ema_buffers[layer_key] <= tau:
-                    effective_alpha = 0.0
-
-            # 4. Recombine components using the gated alpha value
-            gated_grad = ortho_grad + effective_alpha * parallel_grad
-
-            # Update the gradient in-place
-            layer.weight.grad.copy_(gated_grad)
-
-
-def update_PowerGPM_bases(model, images, gamma=0.5, q_thresh=0.2, energy_cutoff=0.99,
-                          feature_list=None, activation_fn=torch.tanh):
-    """
-    Extracts structurally meaningful basis vectors using fractional energy truncation,
-    preventing subspace saturation while calculating power-law leakage.
-
-    Args:
-        model: The active neural network module.
-        images: Calibration image batch tensor.
-        gamma: Exponent tuning the steepness of the power-law protection curve.
-        q_thresh: Fractional order power to flatten the power-law spectrum for truncation.
-        energy_cutoff: Cumulative variance percentage to retain (e.g., 0.99).
-        feature_list: Persistent list tracking [basis_matrix, leakage_vector] per layer.
-    """
-    model.eval()
-    with torch.no_grad():
-        reps = model.get_pre_activations(images)
-
-    flattened_images = images.view(images.size(0), -1)
-    all_inputs = [flattened_images]
-
-    for h in list(reps.values())[:-1]:
-        activated_h = activation_fn(h)
-        all_inputs.append(activated_h.view(h.size(0), -1))
-
-    if feature_list is None:
-        feature_list = [None] * len(all_inputs)
-
-    current_ranks = []
-
-    for i, activation in enumerate(all_inputs):
-        X = activation.cpu().numpy()
-        U, S, Vh = np.linalg.svd(X, full_matrices=False)
-
-        # 1. Compute the compressed fractional energy spectrum
-        # Using a small q power flattens the power law, allowing us to find the true noise floor
-        fractional_energy = S ** (2 * q_thresh)
-        cumulative_fractional_var = np.cumsum(fractional_energy) / np.sum(fractional_energy)
-
-        # Determine the truncation cutoff index k
-        k = np.argmax(cumulative_fractional_var >= energy_cutoff) + 1
-        current_ranks.append(k)
-
-        # 2. Extract only the active structural directions and singular values
-        S_truncated = S[:k]
-        task_basis = Vh[:k].T  # Shape: (In_Features, k)
-
-        # 3. Calculate scale-invariant leakage vector ONLY across the active coordinates
-        relative_energy = (S_truncated / (S_truncated.max() + 1e-10)) ** gamma
-        leakage_vector = 1.0 - relative_energy
-
-        if feature_list[i] is None:
-            feature_list[i] = (task_basis, leakage_vector)
-        else:
-            # Reconcile sequential tasks cleanly on host CPU memory
-            old_basis_tensor, old_leak = feature_list[i]
-            old_basis = old_basis_tensor.detach().cpu().numpy()
-
-            combined = np.concatenate((old_basis, task_basis), axis=1)
-            U_new, S_new, _ = np.linalg.svd(combined, full_matrices=False)
-
-            # Run the fractional check on the combined space to keep dimensions tight
-            frac_energy_new = S_new ** (2 * q_thresh)
-            cum_frac_var_new = np.cumsum(frac_energy_new) / np.sum(frac_energy_new)
-            k_new = np.argmax(cum_frac_var_new >= energy_cutoff) + 1
-
-            merged_basis = U_new[:, :k_new]
-            rel_energy_new = (S_new[:k_new] / (S_new[:k_new].max() + 1e-10)) ** gamma
-            merged_leak = 1.0 - rel_energy_new
-
-            feature_list[i] = (merged_basis, merged_leak)
-
-    # Pre-load the pruned, scale-aware matrices to the GPU device
-    device = next(model.parameters()).device
-    tensor_bases = []
-    for item in feature_list:
-        if item is not None:
-            b_mat, l_vec = item
-            t_basis = torch.tensor(b_mat, dtype=torch.float32, device=device)
-            t_leak = torch.tensor(l_vec, dtype=torch.float32, device=device)
-            tensor_bases.append((t_basis, t_leak))
-        else:
-            tensor_bases.append(None)
-
-    return tensor_bases, current_ranks
-
-
-def apply_PowerGPM_projection(linear_layers, feature_list):
-    """
-    Applies a scale-aware, non-linear subspace projection. Rather than a flat,
-    scalar leakage ceiling, the attenuation factor decays smoothly along the
-    power-law spectrum of past activations.
-
-    Args:
-        linear_layers: A pre-cached list of nn.Linear modules.
-        feature_list: Persistent list containing (basis_tensor, leak_tensor) tuples.
-    """
-    if feature_list is None:
-        return
-
-    with torch.no_grad():
-        for i, layer in enumerate(linear_layers):
-            if i >= len(feature_list) or feature_list[i] is None:
-                continue
-
-            grad = layer.weight.grad
-            if grad is None:
-                continue
-
-            # Unpack your multi-scale spectral tuple
-            basis, leakage = feature_list[i]
-            # basis shape: (In_Features, Full_Rank)
-            # leakage shape: (Full_Rank)
-
-            # 1. Transform the gradient into your orthogonal coordinate basis
-            # Math: G_transformed = G @ B
-            grad_in_subspace = torch.mm(grad, basis)
-
-            # 2. Apply scale-aware damping vector elements directly along the channels
-            # Multiplying by the leakage scales down coordinates matching macro spikes
-            # while leaving the high-ID background elements perfectly intact
-            gated_subspace_grad = grad_in_subspace * leakage
-
-            # 3. Project back out to standard parameter space
-            # Math: G_gated = G_orthogonal + (G_parallel * leak) => G @ (I - B @ diag(1-leak) @ B.T)
-            gated_grad = torch.mm(gated_subspace_grad, basis.t())
-
-            # Update the parameter gradient tensor in-place
-            layer.weight.grad.copy_(gated_grad)
-
-
-def update_SparseGPM_bases(
-    model,
-    images,
-    global_threshold,
-    local_threshold=1.0,
-    xi=0.0,
-    feature_list=None,
-    activation_fn=torch.tanh,
-):
-    model.eval()
-    with torch.no_grad():
-        reps = model.get_pre_activations(images)
-
-    flattened_images = images.view(images.size(0), -1)
-    all_inputs = [flattened_images]
-
-    for h in list(reps.values())[:-1]:
-        activated_h = activation_fn(h)
-        all_inputs.append(activated_h.view(h.size(0), -1))
-
-    if feature_list is None:
-        feature_list = [None] * len(all_inputs)
-
-    current_ranks = []
-
-    for i, activation in enumerate(all_inputs):
-        # 1. Shape Transformation: (Samples, N_dim) -> (N_dim, Samples)
-        # Matches textbook GPM formulation: R_l = [x_1, x_2, ..., x_ns]
-        R = activation.cpu().numpy().T
-        N_dim = R.shape[0]
-
-        # Calculate total raw Frobenius norm variance of the incoming domain
-        total_variance_sq = np.sum(R ** 2)
+class GPM:
+    def __init__(self, variance_threshold=0.97, orthog_method="qr"):
+        self.variance_threshold = variance_threshold
+        self.orthog_method = orthog_method.lower()
+
+        if self.orthog_method not in ["qr", "lowdin"]:
+            raise ValueError("orthog_method must be either 'qr' or 'lowdin'")
+
+        self.global_bases = {}
+
+    def _orthogonalize(self, W, eps=1e-8):
+        if self.orthog_method == "qr":
+            Q, R_qr = torch.linalg.qr(W)
+            # Phase correction matching old working script
+            d_diag = torch.diagonal(R_qr, dim1=-2, dim2=-1)
+            ph = d_diag / (torch.abs(d_diag) + eps)
+            return Q * ph.unsqueeze(0)
+        elif self.orthog_method == "lowdin":
+            Gram = W.T @ W
+            eigenvalues, eigenvectors = torch.linalg.eigh(Gram)
+            e_clamped = torch.clamp(eigenvalues, min=eps)
+            inv_sqrt_matrix = (
+                eigenvectors @ torch.diag(1.0 / torch.sqrt(e_clamped)) @ eigenvectors.T
+            )
+            return W @ inv_sqrt_matrix
+
+    def update_basis(self, layer_id, live_activations, masking_fn=None):
+        if live_activations.dim() > 2:
+            live_activations = live_activations.flatten(start_dim=1)
+
+        # Always orient R as [in_features, batch_size]
+        # (Cast to float64 internally for numerical stability matching NumPy)
+        R = live_activations.T.to(torch.float64)
+
+        # 1. Total Raw Variance Energy
+        total_variance_sq = torch.sum(R**2).item()
         if total_variance_sq < 1e-12:
-            current_ranks.append(0)
-            continue
+            return 0
 
-        # 2. EQUATION 8: RESIDUAL PROJECTION LAYER ELIMINATION
-        if feature_list[i] is not None:
-            old_basis = feature_list[i]
-            if torch.is_tensor(old_basis):
-                old_basis = old_basis.cpu().numpy()
-
-            # Project onto accumulated memory: R_proj = M @ (M.T @ R)
-            R_proj = old_basis @ (old_basis.T @ R)
-            # Isolate pure unexplained innovations: R_hat = R - R_proj
+        # 2. Residual Projection & Variance Accounting
+        if layer_id in self.global_bases:
+            current_basis = self.global_bases[layer_id].to(torch.float64)
+            R_proj = current_basis @ (current_basis.T @ R)
             R_hat = R - R_proj
-            norm_projected_sq = np.sum(R_proj ** 2)
+            norm_projected_sq = torch.sum(R_proj**2).item()
         else:
             R_hat = R
-            old_basis = None
             norm_projected_sq = 0.0
 
-        # 3. EQUATION 9: SVD ON ISOLATED RESIDUAL COMPONENT
-        U, S, Vh = np.linalg.svd(R_hat, full_matrices=False)
-        s_sq = S**2
+        target_energy = self.variance_threshold * total_variance_sq
 
-        # Compute minimum rank 'k' accounting for historical compensation
-        # ||R_proj||^2 + ||(R_hat)_k||^2 >= epsilon_th * ||R||^2
-        cumulative_residual_variance = np.cumsum(s_sq)
-        total_accounted_variance = norm_projected_sq + cumulative_residual_variance
-
-        target_energy = global_threshold * total_variance_sq
-
-        # Determine if old tasks already fully satisfy the threshold requirements
+        # If existing memory already satisfies the energy threshold
         if norm_projected_sq >= target_energy:
-            k = 0
+            return 0
+
+        # 3. SVD on Isolated Residual Activations
+        U, S_vals, _ = torch.linalg.svd(R_hat, full_matrices=False)
+        s_squared = S_vals**2
+
+        cum_residual_var = torch.cumsum(s_squared, dim=0)
+        total_accounted_var = norm_projected_sq + cum_residual_var
+
+        satisfying_mask = total_accounted_var >= target_energy
+        if not torch.any(satisfying_mask):
+            # FIX: If threshold isn't met due to float precision, take all components
+            k = S_vals.shape[0]
         else:
-            k = np.argmax(total_accounted_variance >= target_energy) + 1
+            k = torch.where(satisfying_mask)[0][0].item() + 1
 
-        current_ranks.append(k)
+        task_basis = U[:, :k].clone().to(torch.float32)
 
-        if k == 0:
-            # No new structural directions found; maintain current matrix
-            continue
+        # 4. Optional Soft Masking & Re-Orthogonalization
+        if masking_fn is not None:
+            # CRITICAL FIX: Pass R_hat.T (residual activations) instead of live_activations!
+            R_hat_float32 = R_hat.T.to(torch.float32)
+            mask = masking_fn(task_basis, R_hat_float32)
 
-        # Extract left singular vectors spanning the newly discovered innovation space
-        raw_basis_vectors = U[:, :k]  # Shape: (N_dim, k)
+            task_basis_masked = task_basis * mask
 
-        # 4. SPARSE ENVELOPE INTERCEPTION (SparseGPM Variant Condition)
-        if local_threshold >= 1.0:
-            # Faithful GPM Baseline Path
-            task_basis = raw_basis_vectors
+            # CRITICAL FIX: Re-normalize each column to unit length before QR!
+            col_norms = torch.norm(task_basis_masked, dim=0, keepdim=True)
+            col_norms[col_norms == 0] = 1.0
+            task_basis_masked = task_basis_masked / col_norms
+
+            new_basis = self._orthogonalize(task_basis_masked)
         else:
-            # Custom Heavy-Tailed Pruning Matrix Operations
-            if xi > 0:
-                norms = np.linalg.norm(R_hat, axis=1, keepdims=True)
-                norms[norms == 0] = 1e-9
-                R_normalized = R_hat / norms
+            new_basis = task_basis
 
-                cosine_similarity = R_normalized @ R_normalized.T
-                cosine_distance = 1.0 - np.abs(cosine_similarity)
-                cosine_distance = np.nan_to_num(cosine_distance, nan=0.0)
-
-            sparse_basis_columns = []
-            # Iterate through individual column basis vectors to identify local hubs
-            for col_idx in range(k):
-                v = raw_basis_vectors[:, col_idx]
-                neuron_contributions = np.abs(v) ** 2
-
-                sort_idx = np.argsort(neuron_contributions)[::-1]
-                sorted_contribs = neuron_contributions[sort_idx]
-
-                cum_neuron_variance = np.cumsum(sorted_contribs)
-                num_neurons_kept = np.argmax(cum_neuron_variance >= local_threshold) + 1
-                keep_indices = sort_idx[:num_neurons_kept]
-
-                if xi > 0:
-                    soft_mask = np.zeros(N_dim)
-                    for hub in keep_indices:
-                        d_from_hub = cosine_distance[hub, :]
-                        envelope = (1.0 + d_from_hub / xi) ** (-1.0)
-                        soft_mask = np.maximum(soft_mask, envelope)
-                    v_processed = v * soft_mask
-                else:
-                    v_processed = np.zeros_like(v)
-                    v_processed[keep_indices] = v[keep_indices]
-
-                v_norm = np.linalg.norm(v_processed)
-                if v_norm > 0:
-                    v_processed /= v_norm
-                sparse_basis_columns.append(v_processed)
-
-            task_basis = np.stack(sparse_basis_columns, axis=1)
-
-            # Re-orthogonalize modified entries via QR Decomposition
-            if task_basis.shape[1] > 0:
-                Q, R_qr = np.linalg.qr(task_basis)
-                d_diag = np.diag(R_qr)
-                ph = d_diag / (np.abs(d_diag) + 1e-12)
-                task_basis = Q * ph
-
-        # 5. LINE 21: DIRECT COLUMN APPENDING (NO JOINT RESAMPLING)
-        if old_basis is None:
-            feature_list[i] = task_basis
+        # 5. Append to Global Memory Vault
+        if layer_id not in self.global_bases:
+            self.global_bases[layer_id] = new_basis
         else:
-            if task_basis.shape[1] > 0:
-                # Direct structural column concatenation as dictated by GPM paper
-                feature_list[i] = np.concatenate((old_basis, task_basis), axis=1)
+            self.global_bases[layer_id] = torch.cat(
+                [self.global_bases[layer_id], new_basis], dim=1
+            )
 
-    # Convert memory registers back to runtime PyTorch tensors
-    device = next(model.parameters()).device
-    tensor_bases = [
-        (
-            torch.tensor(b, dtype=torch.float32, device=device)
-            if b is not None and not torch.is_tensor(b)
-            else b
-        )
-        for b in feature_list
-    ]
+        return k
 
-    return tensor_bases, current_ranks
+    def project_gradient(self, layer_id, grad):
+        if layer_id not in self.global_bases or self.global_bases[layer_id] is None:
+            return grad
 
+        basis = self.global_bases[layer_id]
 
-def update_HTGPM_bases(
-    model,
-    images,
-    global_threshold,
-    alpha=1.2,          # Tail index matching the heavy-tailed initialization
-    eta=1e-3,           # Regularization parameter for Resolvent edge shifting
-    feature_list=None,
-    activation_fn=torch.tanh,
-):
-    model.eval()
-    with torch.no_grad():
-        reps = model.get_pre_activations(images)
+        if grad.dim() == 2:  # Weight matrix [out_dim, in_dim]
+            return grad - (grad @ basis) @ basis.T
+        else:  # Bias vector [hidden_dim]
+            return grad - basis @ (basis.T @ grad)
 
-    flattened_images = images.view(images.size(0), -1)
-    all_inputs = [flattened_images]
+    def project_model_gradients(self, model):
+        for name, param in model.named_parameters():
+            if param.grad is not None and name in self.global_bases:
+                param.grad.copy_(self.project_gradient(name, param.grad))
 
-    for h in list(reps.values())[:-1]:
-        activated_h = activation_fn(h)
-        all_inputs.append(activated_h.view(h.size(0), -1))
+    def get_basis_ranks(self):
+        return {
+            layer_id: (basis.shape[1] if basis is not None else 0)
+            for layer_id, basis in self.global_bases.items()
+        }
 
-    if feature_list is None:
-        feature_list = [None] * len(all_inputs)
-
-    current_ranks = []
-
-    for i, activation in enumerate(all_inputs):
-        # 1. Shape Transformation: (Samples, N_dim) -> (N_dim, Samples)
-        # R_l = [x_1, x_2, ..., x_ns] as formulated in classical GPM
-        R = activation.cpu().numpy().T
-        N_dim = R.shape[0]
-
-        # Calculate total raw Frobenius norm variance of the incoming domain
-        total_variance_sq = np.sum(R ** 2)
-        if total_variance_sq < 1e-12:
-            current_ranks.append(0)
-            continue
-
-        # 2. RESIDUAL PROJECTION LAYER ELIMINATION
-        if feature_list[i] is not None:
-            old_basis = feature_list[i]
-            if torch.is_tensor(old_basis):
-                old_basis = old_basis.cpu().numpy()
-
-            # Project onto accumulated memory: R_proj = M @ (M.T @ R)
-            R_proj = old_basis @ (old_basis.T @ R)
-            # Isolate pure unexplained innovations
-            R_hat = R - R_proj
-            norm_projected_sq = np.sum(R_proj ** 2)
-        else:
-            R_hat = R
-            old_basis = None
-            norm_projected_sq = 0.0
-
-        # 3. SVD ON ISOLATED RESIDUAL COMPONENT
-        U, S, Vh = np.linalg.svd(R_hat, full_matrices=False)
-        s_sq = S**2
-
-        # Compute minimum rank 'k' accounting for historical compensation
-        # ||R_proj||^2 + ||(R_hat)_k||^2 >= epsilon_th * ||R||^2
-        cumulative_residual_variance = np.cumsum(s_sq)
-        total_accounted_variance = norm_projected_sq + cumulative_residual_variance
-
-        target_energy = global_threshold * total_variance_sq
-
-        # Determine if old tasks already fully satisfy the threshold requirements
-        if norm_projected_sq >= target_energy:
-            k = 0
-        else:
-            k = np.argmax(total_accounted_variance >= target_energy) + 1
-
-        current_ranks.append(k)
-
-        if k == 0:
-            # No new structural directions found; maintain current matrix states
-            continue
-
-        # Extract left singular vectors spanning the newly discovered innovation space
-        raw_basis_vectors = U[:, :k]  # Shape: (N_dim, k)
-
-        # =====================================================================
-        # 4. HEAVY-TAILED RANDOM MATRIX THEORY OPERATOR ASSEMBLY (HTGPM)
-        # =====================================================================
-
-        # A. Construct the Empirical Matrix Operator and find its spectral edge
-        A = R_hat @ R_hat.T
-        eigenvalues = np.linalg.eigvalsh(A)
-        lambda_max = eigenvalues[-1]
-
-        # B. Compute the Complex-Shifted Resolvent Matrix: G(z) = (A - zI)^-1
-        z = lambda_max + 1j * eta
-        Resolvent = np.linalg.inv(A - z * np.eye(N_dim))
-        resolvent_envelope_matrix = np.abs(Resolvent)
-
-        # C. Transform Resolvent entries into a stable RMT Distance Topology (0 to 1)
-        # Uses Cauchy-Schwarz style spatial normalization to eliminate magnitude biases
-        diag_G = np.diagonal(resolvent_envelope_matrix)
-        normalization_matrix = np.sqrt(np.outer(diag_G, diag_G))
-        rmt_similarity = resolvent_envelope_matrix / (normalization_matrix + 1e-9)
-        rmt_distance_matrix = 1.0 - rmt_similarity
-
-        # D. Mask Processing Loop
-        sparse_basis_columns = []
-        xi_resolvent = alpha   # Localization length matches tail index
-        eta_resolvent = alpha  # Algebraic decay matches stable density index
-
-        for col_idx in range(k):
-            v = raw_basis_vectors[:, col_idx]
-            v = v / (np.linalg.norm(v) + 1e-12) # Strict vector normalization
-
-            # Diagnostic Gatekeeper: Compute Inverse Participation Ratio (4th power)
-            ipr_val = np.sum(v ** 4)
-            # Safe boundary constraint: ceiling target calculation
-            effective_hubs_count = int(np.ceil(1.0 / ipr_val))
-
-            # Isolate physical hub locations using energy rank (2nd power)
-            neuron_contributions = np.abs(v) ** 2
-            sort_idx = np.argsort(neuron_contributions)[::-1]
-            rmt_hub_indices = sort_idx[:effective_hubs_count]
-
-            # Apply alpha-parameterized continuous Power-Law decay around hubs
-            soft_mask = np.zeros(N_dim)
-            for hub in rmt_hub_indices:
-                d_from_hub = rmt_distance_matrix[hub, :]
-
-                # Power-law profile matching heavy-tailed statistics
-                envelope = (1.0 + d_from_hub / xi_resolvent) ** (-eta_resolvent)
-
-                # Constructive structural masking over multiple anchors
-                soft_mask = np.maximum(soft_mask, envelope)
-
-            # Bounding enforcement
-            if np.max(soft_mask) > 0:
-                soft_mask /= np.max(soft_mask)
-
-            # Intercept basis geometry using the RMT soft envelope
-            v_processed = v * soft_mask
-
-            # Restore unit normal orientation to maintain projection integrity
-            v_norm = np.linalg.norm(v_processed)
-            if v_norm > 0:
-                v_processed /= v_norm
-
-            sparse_basis_columns.append(v_processed)
-
-        task_basis = np.stack(sparse_basis_columns, axis=1)
-
-        # Re-orthogonalize modified entries via clean QR Decomposition
-        if task_basis.shape[1] > 0:
-            Q, R_qr = np.linalg.qr(task_basis)
-            d_diag = np.diag(R_qr)
-            ph = d_diag / (np.abs(d_diag) + 1e-12)
-            task_basis = Q * ph
-
-        # 5. DIRECT COLUMN APPENDING TO ACCUMULATED MEMORY
-        if old_basis is None:
-            feature_list[i] = task_basis
-        else:
-            if task_basis.shape[1] > 0:
-                feature_list[i] = np.concatenate((old_basis, task_basis), axis=1)
-
-    # Convert memory registers back to runtime PyTorch tensors
-    device = next(model.parameters()).device
-    tensor_bases = [
-        (
-            torch.tensor(b, dtype=torch.float32, device=device)
-            if b is not None and not torch.is_tensor(b)
-            else b
-        )
-        for b in feature_list
-    ]
-
-    return tensor_bases, current_ranks
+    def get_total_basis_rank(self):
+        return sum(self.get_basis_ranks().values())
 
 
-def apply_SparseGPM_projection(linear_layers, feature_list):
-    """Applies standard, clean orthogonal gradient projections.
-
-    Because the feature_list contains hyper-sparse basis coordinates from the
-    HT localization, this standard math automatically isolates parameter memory.
+def rmt_resolvent_masking(task_basis, live_activations, gamma=0.0001, beta=0.01):
     """
-    if feature_list is None:
-        return
+    Method 4: Pure RMT Resolvent Similarity (Streamlined HTGPM)
 
-    with torch.no_grad():
-        for i, layer in enumerate(linear_layers):
-            if i >= len(feature_list) or feature_list[i] is None:
-                continue
+    Args:
+        task_basis (torch.Tensor): Singular vectors U[:, :k] of shape [N_dim, k].
+        live_activations (torch.Tensor): Live input activations [Batch, N_dim].
+        gamma (float): Spectral distance past the edge (delta = gamma * lambda_max).
+        beta (float): Spectral blur factor for imaginary shift (eta = beta * mean_var).
 
-            grad = layer.weight.grad
-            if grad is None:
-                continue
+    Returns:
+        torch.Tensor: Continuous soft mask of shape [N_dim, k] on the original device.
+    """
+    device = task_basis.device
 
-            basis = feature_list[i]  # Shape: (In_Features, K)
+    # 1. Convert inputs to NumPy arrays matching your original logic
+    # live_activations arrives as [Batch, N_dim]
+    R_hat = live_activations.detach().cpu().numpy()
+    raw_basis = task_basis.detach().cpu().numpy()  # [N_dim, k]
 
-            # Clean Standard GPM Math: G_parallel = G @ B @ B.T
-            parallel_grad = torch.mm(torch.mm(grad, basis), basis.t())
+    N_dim, k = raw_basis.shape
+    if k == 0 or N_dim == 0:
+        return torch.ones_like(task_basis)
 
-            # G_projected = G - G_parallel
-            projected_grad = grad - parallel_grad
+    # 2. Covariance Operator Frame [N_dim x N_dim]
+    A_op = R_hat.T @ R_hat
 
-            # In-place gradient update
-            layer.weight.grad.copy_(projected_grad)
+    # 3. Complete Eigenspectrum Isolation
+    eigenvalues, eigenvectors = np.linalg.eigh(A_op)
+    lambda_max = eigenvalues[-1]
+
+    active_eigs = eigenvalues[eigenvalues > 1e-5]
+    mean_active_variance = np.mean(active_eigs) if len(active_eigs) > 0 else 1.0
+
+    # 4. Dimensionless Tuning Dials & Complex Resolvent Shift
+    delta = gamma * lambda_max
+    eta_dynamic = beta * mean_active_variance
+
+    z = (lambda_max + delta) + 1j * eta_dynamic
+    resolvent_diagonal = 1.0 / (eigenvalues - z)
+
+    # 5. Reconstitute Complex Spatial Resolvent via Functional Calculus
+    G_complex = eigenvectors @ np.diag(resolvent_diagonal) @ eigenvectors.T
+    resolvent_envelope_matrix = np.abs(G_complex)
+
+    # 6. Pure Scale-Invariant Similarity
+    diag_G = np.diagonal(resolvent_envelope_matrix)
+    normalization_matrix = np.sqrt(np.outer(diag_G, diag_G))
+    rmt_similarity = resolvent_envelope_matrix / (normalization_matrix + 1e-9)
+
+    # 7. Mask Extraction Loop Across Singular Vector Columns
+    mask_columns = []
+
+    for col_idx in range(k):
+        v = raw_basis[:, col_idx]
+        v_norm = np.linalg.norm(v) + 1e-12
+        v_unit = v / v_norm
+
+        # Inverse Participation Ratio (IPR) to detect hub concentration
+        ipr_val = np.sum(v_unit**4)
+        effective_hubs_count = int(np.ceil(1.0 / ipr_val))
+
+        # Isolate physical hub locations via 2nd power energy rank
+        neuron_contributions = np.abs(v_unit) ** 2
+        sort_idx = np.argsort(neuron_contributions)[::-1]
+        rmt_hub_indices = sort_idx[:effective_hubs_count]
+
+        # Aggregate Greens function envelope across hubs
+        soft_mask = np.zeros(N_dim)
+        for hub in rmt_hub_indices:
+            envelope = rmt_similarity[hub, :]
+            soft_mask = np.maximum(soft_mask, envelope)
+
+        # Bounding Enforcement
+        max_val = np.max(soft_mask)
+        if max_val > 0:
+            soft_mask /= max_val
+
+        # Store soft mask squared as per Method 4 formulation
+        mask_columns.append(soft_mask**2)
+
+    # Stack columns to shape [N_dim, k]
+    M_rmt_total = np.stack(mask_columns, axis=1)
+
+    # Convert back to PyTorch tensor on original device
+    return torch.tensor(M_rmt_total, dtype=task_basis.dtype, device=device)
+
+
+def ipr_delta_d_masking_fn(task_basis, live_activations, alpha_0=1.5, gamma=4.0):
+    """
+    Simplified Multifractal IPR + Delta D Masking Strategy
+
+    Args:
+        task_basis (torch.Tensor): Singular vectors U[:, :k] of shape [N_dim, k].
+        live_activations (torch.Tensor): Live input activations [Batch, N_dim].
+        alpha_0 (float): Baseline power-law exponent for standard/monofractal states (Delta D = 0).
+        gamma (float): Sensitivity multiplier scaling exponent decay relative to Delta D.
+
+    Returns:
+        torch.Tensor: Continuous mask of shape [N_dim, k] on original device.
+    """
+    device = task_basis.device
+    raw_basis = task_basis.detach().cpu().numpy()  # [N_dim, k]
+
+    N_dim, k = raw_basis.shape
+    if k == 0 or N_dim == 0:
+        return torch.ones_like(task_basis)
+
+    M_multifractal = np.zeros((N_dim, k), dtype=np.float32)
+    log_N = np.log(N_dim) if N_dim > 1 else 1.0
+
+    for col in range(k):
+        v = raw_basis[:, col]
+        v_unit = v / (np.linalg.norm(v) + 1e-12)
+        mag = np.abs(v_unit)
+
+        # 1. Energy Distribution & Dimensions (D1 and D2)
+        p = (mag**2) / (np.sum(mag**2) + 1e-12)
+
+        d1 = (-np.sum(p * np.log(p + 1e-12))) / log_N
+        ipr = np.sum(p**2)
+        d2 = -np.log(max(ipr, 1e-12)) / log_N
+
+        # 2. Singularity Spread
+        mf_delta = max(0.0, d1 - d2)
+
+        # 3. Hubs & Margins
+        num_hubs = max(1, int(np.round(1.0 / ipr)))
+        sort_idx = np.argsort(mag)[::-1]
+        hub_idx, margin_idx = sort_idx[:num_hubs], sort_idx[num_hubs:]
+
+        M_multifractal[hub_idx, col] = 1.0
+
+        # 4. Simple Direct Exponential Adjustment
+        # alpha_0 sets the baseline; gamma scales down exponent as multifractality increases
+        alpha_dynamic = max(0.1, alpha_0 - gamma * mf_delta)
+
+        # 5. Tail Envelope
+        if len(margin_idx) > 0:
+            max_mar, min_mar = mag[sort_idx[num_hubs]], mag[sort_idx[-1]]
+            denom = max_mar - min_mar
+            if denom > 1e-8:
+                norm_margin = (mag[margin_idx] - min_mar) / denom
+                M_multifractal[margin_idx, col] = np.power(norm_margin, alpha_dynamic)
+
+    return torch.tensor(M_multifractal, dtype=task_basis.dtype, device=device)
+
+
+def htgpm_powerlaw_resolvent_masking_fn(
+    task_basis, live_activations, alpha=2.0, eta=1e-3
+):
+    """
+    Original HTGPM Resolvent Power-Law Masking Function
+
+    Transforms the Resolvent complex spatial metric into a topological
+    distance matrix, then applies a power-law spatial decay profile around
+    hubs isolated via Inverse Participation Ratio (IPR).
+
+    Args:
+        task_basis (torch.Tensor): Singular vectors U[:, :k] of shape [N_dim, k].
+        live_activations (torch.Tensor): Live input activations [Batch, N_dim].
+        alpha (float): Tail index / localization length parameter (xi = eta_decay = alpha).
+        eta (float): Regularization shift for Resolvent complex edge (lambda_max + 1j * eta).
+
+    Returns:
+        torch.Tensor: Power-law soft mask of shape [N_dim, k] on the original device.
+    """
+    device = task_basis.device
+    raw_basis = task_basis.detach().cpu().numpy()  # [N_dim, k]
+    R_hat = live_activations.detach().cpu().numpy().T  # Shape: [N_dim, Batch]
+
+    N_dim, k = raw_basis.shape
+    if k == 0 or N_dim == 0:
+        return torch.ones_like(task_basis)
+
+    # 1. Empirical Matrix Operator A = R_hat @ R_hat.T
+    A = R_hat @ R_hat.T
+
+    # Extract spectral edge via Hermitian eigenvalue decomposition
+    eigenvalues = np.linalg.eigvalsh(A)
+    lambda_max = eigenvalues[-1]
+
+    # 2. Compute Complex-Shifted Resolvent Matrix: G(z) = (A - zI)^-1
+    # Stabilized using np.linalg.solve instead of direct inv
+    z = lambda_max + 1j * eta
+    system_matrix = A - z * np.eye(N_dim, dtype=np.complex128)
+    Resolvent = np.linalg.solve(system_matrix, np.eye(N_dim, dtype=np.complex128))
+    resolvent_envelope_matrix = np.abs(Resolvent)
+
+    # 3. Scale-Invariant Cauchy-Schwarz Normalization to RMT Distance Topology (0 to 1)
+    diag_G = np.diagonal(resolvent_envelope_matrix)
+    normalization_matrix = np.sqrt(np.outer(diag_G, diag_G))
+    rmt_similarity = resolvent_envelope_matrix / (normalization_matrix + 1e-9)
+    rmt_distance_matrix = np.clip(1.0 - rmt_similarity, 0.0, 1.0)
+
+    # 4. Mask Processing Loop Across Columns
+    mask_columns = []
+    xi_resolvent = alpha  # Localization length
+    eta_resolvent = alpha  # Power-law algebraic decay exponent
+
+    for col_idx in range(k):
+        v = raw_basis[:, col_idx]
+        v_unit = v / (np.linalg.norm(v) + 1e-12)
+
+        # Compute Inverse Participation Ratio (IPR) for Hub Isolation
+        ipr_val = np.sum(v_unit**4)
+        effective_hubs_count = int(np.ceil(1.0 / ipr_val))
+
+        # Isolate hub indices using 2nd power energy rank
+        neuron_contributions = np.abs(v_unit) ** 2
+        sort_idx = np.argsort(neuron_contributions)[::-1]
+        rmt_hub_indices = sort_idx[:effective_hubs_count]
+
+        # Apply continuous Power-Law decay around hubs: (1 + d / xi)^(-eta)
+        soft_mask = np.zeros(N_dim, dtype=np.float32)
+        for hub in rmt_hub_indices:
+            d_from_hub = rmt_distance_matrix[hub, :]
+            envelope = (1.0 + d_from_hub / xi_resolvent) ** (-eta_resolvent)
+            soft_mask = np.maximum(soft_mask, envelope)
+
+        # Bounding enforcement
+        max_val = np.max(soft_mask)
+        if max_val > 0:
+            soft_mask /= max_val
+
+        mask_columns.append(soft_mask)
+
+    M_powerlaw = np.stack(mask_columns, axis=1)
+
+    return torch.tensor(M_powerlaw, dtype=task_basis.dtype, device=device)
