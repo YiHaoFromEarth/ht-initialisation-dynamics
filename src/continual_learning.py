@@ -214,8 +214,7 @@ class GPM:
             live_activations = live_activations.flatten(start_dim=1)
 
         # Always orient R as [in_features, batch_size]
-        # (Cast to float64 internally for numerical stability matching NumPy)
-        R = live_activations.T.to(torch.float64)
+        R = live_activations.T.to(torch.float32)
 
         # 1. Total Raw Variance Energy
         total_variance_sq = torch.sum(R**2).item()
@@ -224,7 +223,7 @@ class GPM:
 
         # 2. Residual Projection & Variance Accounting
         if layer_id in self.global_bases:
-            current_basis = self.global_bases[layer_id].to(torch.float64)
+            current_basis = self.global_bases[layer_id].to(torch.float32)
             R_proj = current_basis @ (current_basis.T @ R)
             R_hat = R - R_proj
             norm_projected_sq = torch.sum(R_proj**2).item()
