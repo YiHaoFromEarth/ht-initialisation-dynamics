@@ -219,7 +219,12 @@ class GPM:
         # 1. Total Raw Variance Energy
         total_variance_sq = torch.sum(R**2).item()
         if total_variance_sq < 1e-12:
-            return 0
+            diagnostics = {
+                "total_variance_sq": total_variance_sq,
+                "norm_projected_sq": 0.0,
+                "residual_variance_sq": 0.0,
+            }
+            return 0, diagnostics
 
         # 2. Residual Projection & Variance Accounting
         if layer_id in self.global_bases:
@@ -231,11 +236,20 @@ class GPM:
             R_hat = R
             norm_projected_sq = 0.0
 
+        residual_variance_sq = torch.sum(R_hat**2).item()
+
+        # Package raw energy metrics
+        diagnostics = {
+            "total_variance_sq": total_variance_sq,
+            "norm_projected_sq": norm_projected_sq,
+            "residual_variance_sq": residual_variance_sq,
+        }
+
         target_energy = self.variance_threshold * total_variance_sq
 
         # If existing memory already satisfies the energy threshold
         if norm_projected_sq >= target_energy:
-            return 0
+            return 0, diagnostics
 
         # 3. SVD on Isolated Residual Activations
         U, S_vals, _ = torch.linalg.svd(R_hat, full_matrices=False)
@@ -278,7 +292,7 @@ class GPM:
                 [self.global_bases[layer_id], new_basis], dim=1
             )
 
-        return k
+        return k, diagnostics
 
     def project_gradient(self, layer_id, grad):
         if layer_id not in self.global_bases or self.global_bases[layer_id] is None:
