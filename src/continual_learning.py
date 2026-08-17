@@ -1,4 +1,5 @@
-import copy
+import csv
+import os
 
 import numpy as np
 import torch
@@ -6,304 +7,114 @@ import torch.nn.functional as F
 from torch import nn
 
 
-class EWC:
-    def __init__(self, model, ewc_lambda=1000):
-        """
-        Args:
-            model: Your GeneralMLP instance.
-            ewc_lambda: Regularization strength (hyperparameter).
-        """
-        self.model = model
-        self.ewc_lambda = ewc_lambda
-        self.params = {
-            n: p for n, p in self.model.named_parameters() if p.requires_grad
-        }
-        self._means = {}
-        self._precision_matrices = {}
-
-    def on_task_end(self, dataset, device, num_samples=300):
-        """
-        Calculates the Fisher Information Matrix diagonal and stores task weights.
-        Args:
-            dataset: TensorDataset for the task just completed.
-            num_samples: Number of samples to use for Fisher estimation (default matches GPM).
-        """
-        self.model.eval()
-        precision_matrices = {}
-        for n, p in copy.deepcopy(self.params).items():
-            p.data.zero_()
-            precision_matrices[n] = p.data
-
-        # Fisher estimation: Use a subset of the task data
-        loader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=True)
-
-        for i, (input, target) in enumerate(loader):
-            if i >= num_samples:
-                break
-
-            input, target = input.to(device), target.to(device)
-            self.model.zero_grad()
-            output = self.model(input)
-
-            # The Fisher Information is the variance of the score function (gradient of log-likelihood)
-            loss = F.nll_loss(F.log_softmax(output, dim=1), target)
-            loss.backward()
-
-            for n, p in self.model.named_parameters():
-                if p.grad is not None:
-                    precision_matrices[n].data += p.grad.data**2 / num_samples
-
-        # Store mean weights and the Fisher diagonal (precision matrix)
-        for n, p in copy.deepcopy(self.params).items():
-            self._precision_matrices[f"{n}_{len(self._means)}"] = precision_matrices[n]
-            self._means[f"{n}_{len(self._means)}"] = p.data
-
-    def penalty(self, model):
-        """Calculates the weighted squared penalty between current and past weights."""
-        loss = 0
-        for n, p in model.named_parameters():
-            # Sum penalties across all previous tasks
-            for task_key in self._means:
-                if n in task_key:
-                    _precision = self._precision_matrices[task_key]
-                    _mean = self._means[task_key]
-                    # Math: loss = lambda/2 * Fisher * (theta - theta_old)^2
-                    loss += (_precision * (p - _mean) ** 2).sum()
-        return loss * (self.ewc_lambda / 2)
-
-
-class SpectralNormGain:
-    def __init__(self, name="weight", n_power_iterations=1, gain=1.0):
-        self.name = name
-        self.n_power_iterations = n_power_iterations
-        self.gain = gain
-
-    def compute_weight(self, module, do_power_iteration):
-        weight = getattr(module, self.name + "_orig")
-        u = getattr(module, self.name + "_u")
-        v = getattr(module, self.name + "_v")
-
-        # Power iteration to estimate the largest singular value (sigma)
-        if do_power_iteration:
-            with torch.no_grad():
-                for _ in range(self.n_power_iterations):
-                    # Spectral norm of W is the same as W^T, so we iterate
-                    v.data = F.normalize(torch.mv(weight.t(), u), dim=0, eps=1e-12)
-                    u.data = F.normalize(torch.mv(weight, v), dim=0, eps=1e-12)
-                if self.n_power_iterations > 0:
-                    u.data.copy_(u)
-                    v.data.copy_(v)
-
-        sigma = torch.dot(u, torch.mv(weight, v))
-        # Apply the gain: W_new = gain * (W / sigma)
-        return weight * (self.gain / sigma)
-
-    def __call__(self, module, inputs):
-        setattr(
-            module,
-            self.name,
-            self.compute_weight(module, do_power_iteration=module.training),
-        )
-
-    @staticmethod
-    def apply(module, name, n_power_iterations, gain):
-        for fn in module._forward_pre_hooks.values():
-            if isinstance(fn, SpectralNormGain) and fn.name == name:
-                return fn
-
-        fn = SpectralNormGain(name, n_power_iterations, gain)
-        weight = getattr(module, name)
-
-        # Initialize the u and v vectors for power iteration
-        with torch.no_grad():
-            d = weight.size(0)
-            u = F.normalize(weight.new_empty(d).normal_(0, 1), dim=0, eps=1e-12)
-            v = F.normalize(
-                weight.new_empty(weight.size(1)).normal_(0, 1), dim=0, eps=1e-12
-            )
-
-        # Delete the original weight and replace with buffers/parameters
-        delattr(module, name)
-        module.register_parameter(name + "_orig", nn.Parameter(weight.detach()))
-        module.register_buffer(name + "_u", u)
-        module.register_buffer(name + "_v", v)
-
-        # Add the hook to re-calculate weight before every forward pass
-        module.register_forward_pre_hook(fn)
-        return fn
-
-
-class SAM(torch.optim.Optimizer):
-    def __init__(self, params, base_optimizer, rho=0.05, **kwargs):
-        assert rho >= 0.0, f"Invalid rho, should be non-negative: {rho}"
-        defaults = dict(rho=rho, **kwargs)
-        super().__init__(params, defaults)
-        self.base_optimizer = base_optimizer(self.param_groups, **kwargs)
-        self.param_groups = self.base_optimizer.param_groups
-
-    @torch.no_grad()
-    def first_step(self, zero_grad=False):
-        grad_norm = self._grad_norm()
-        for group in self.param_groups:
-            scale = group["rho"] / (grad_norm + 1e-12)
-            for p in group["params"]:
-                if p.grad is None:
-                    continue
-                # Calculate the 'e_w' perturbation
-                e_w = p.grad * scale.to(p)
-                p.add_(e_w)  # climb to the 'peak'
-                self.state[p]["e_w"] = e_w
-        if zero_grad:
-            self.zero_grad()
-
-    @torch.no_grad()
-    def second_step(self, zero_grad=False):
-        for group in self.param_groups:
-            for p in group["params"]:
-                if p.grad is None:
-                    continue
-                p.sub_(self.state[p]["e_w"])  # get back to original weights
-        self.base_optimizer.step()  # update based on the peak gradient
-        if zero_grad:
-            self.zero_grad()
-
-    def _grad_norm(self):
-        shared_device = self.param_groups[0]["params"][0].device
-        norm = torch.norm(
-            torch.stack(
-                [
-                    p.grad.norm(p=2).to(shared_device)
-                    for group in self.param_groups
-                    for p in group["params"]
-                    if p.grad is not None
-                ]
-            ),
-            p=2,
-        )
-        return norm
-
-
 class GPM:
-    def __init__(self, variance_threshold=0.97, orthog_method="qr"):
+    """Streamlined Gradient Projection Memory for sequential Conv2D and Linear backbones."""
+
+    def __init__(self, variance_threshold=0.97):
         self.variance_threshold = variance_threshold
-        self.orthog_method = orthog_method.lower()
-
-        if self.orthog_method not in ["qr", "lowdin"]:
-            raise ValueError("orthog_method must be either 'qr' or 'lowdin'")
-
         self.global_bases = {}
 
-    def _orthogonalize(self, W, eps=1e-8):
-        if self.orthog_method == "qr":
-            Q, R_qr = torch.linalg.qr(W)
-            # Phase correction matching old working script
-            d_diag = torch.diagonal(R_qr, dim1=-2, dim2=-1)
-            ph = d_diag / (torch.abs(d_diag) + eps)
-            return Q * ph.unsqueeze(0)
-        elif self.orthog_method == "lowdin":
-            Gram = W.T @ W
-            eigenvalues, eigenvectors = torch.linalg.eigh(Gram)
-            e_clamped = torch.clamp(eigenvalues, min=eps)
-            inv_sqrt_matrix = (
-                eigenvectors @ torch.diag(1.0 / torch.sqrt(e_clamped)) @ eigenvectors.T
-            )
-            return W @ inv_sqrt_matrix
+    def extract_representation_matrix(self, live_activations, module, max_patches=2000):
+        """Constructs representation matrix R matching the parameter input dimension."""
+        if isinstance(module, nn.Conv2d):
+            k_h, k_w = module.kernel_size
+            patches = F.unfold(
+                live_activations,
+                kernel_size=(k_h, k_w),
+                padding=module.padding,
+                stride=module.stride,
+            )  # [cite: 2]
+            c_in_k = module.in_channels * k_h * k_w
+            R = patches.transpose(0, 1).contiguous().view(c_in_k, -1)  # [cite: 2]
 
-    def update_basis(self, layer_id, live_activations, masking_fn=None):
-        if live_activations.dim() > 2:
-            live_activations = live_activations.flatten(start_dim=1)
+            if R.size(1) > max_patches:
+                idx = torch.randperm(R.size(1), device=R.device)[:max_patches]
+                R = R[:, idx]
+            return R.to(torch.float32)
 
-        # Always orient R as [in_features, batch_size]
-        R = live_activations.T.to(torch.float32)
+        elif isinstance(module, nn.Linear):
+            if live_activations.dim() > 2:
+                live_activations = live_activations.flatten(start_dim=1)
+            return live_activations.T.to(torch.float32)
 
-        # 1. Total Raw Variance Energy
+        raise TypeError(f"Unsupported module: {type(module)}")
+
+    def update_basis(self, layer_id, module, live_activations, threshold=None):
+        """Computes SVD on isolated residual activations and appends new orthogonal bases."""
+        th = threshold if threshold is not None else self.variance_threshold
+        R = self.extract_representation_matrix(live_activations, module)
+
         total_variance_sq = torch.sum(R**2).item()
         if total_variance_sq < 1e-12:
-            diagnostics = {
+            return 0, {
                 "total_variance_sq": total_variance_sq,
                 "norm_projected_sq": 0.0,
                 "residual_variance_sq": 0.0,
             }
-            return 0, diagnostics
 
-        # 2. Residual Projection & Variance Accounting
+        # 1. Project out existing memory
         if layer_id in self.global_bases:
-            current_basis = self.global_bases[layer_id].to(torch.float32)
-            R_proj = current_basis @ (current_basis.T @ R)
-            R_hat = R - R_proj
+            current_basis = self.global_bases[layer_id].to(
+                R.device, dtype=torch.float32
+            )
+            R_proj = current_basis @ (current_basis.T @ R)  # [cite: 2]
+            R_hat = R - R_proj  # [cite: 2]
             norm_projected_sq = torch.sum(R_proj**2).item()
         else:
             R_hat = R
             norm_projected_sq = 0.0
 
         residual_variance_sq = torch.sum(R_hat**2).item()
-
-        # Package raw energy metrics
         diagnostics = {
             "total_variance_sq": total_variance_sq,
             "norm_projected_sq": norm_projected_sq,
             "residual_variance_sq": residual_variance_sq,
         }
 
-        target_energy = self.variance_threshold * total_variance_sq
-
-        # If existing memory already satisfies the energy threshold
+        target_energy = th * total_variance_sq
         if norm_projected_sq >= target_energy:
             return 0, diagnostics
 
-        # 3. SVD on Isolated Residual Activations
-        U, S_vals, _ = torch.linalg.svd(R_hat, full_matrices=False)
-        s_squared = S_vals**2
-
-        cum_residual_var = torch.cumsum(s_squared, dim=0)
+        # 2. SVD on Residual Space
+        U, S_vals, _ = torch.linalg.svd(R_hat, full_matrices=False)  # [cite: 2]
+        cum_residual_var = torch.cumsum(S_vals**2, dim=0)
         total_accounted_var = norm_projected_sq + cum_residual_var
 
-        satisfying_mask = total_accounted_var >= target_energy
-        if not torch.any(satisfying_mask):
-            # FIX: If threshold isn't met due to float precision, take all components
-            k = S_vals.shape[0]
-        else:
-            k = torch.where(satisfying_mask)[0][0].item() + 1
+        satisfying_mask = total_accounted_var >= target_energy  # [cite: 2]
+        k = (
+            S_vals.shape[0]
+            if not torch.any(satisfying_mask)
+            else torch.where(satisfying_mask)[0][0].item() + 1
+        )
+        new_basis = U[:, :k].clone().to(torch.float32)  # [cite: 2]
 
-        task_basis = U[:, :k].clone().to(torch.float32)
-
-        # 4. Optional Soft Masking & Re-Orthogonalization
-        if masking_fn is not None:
-            # CRITICAL FIX: Pass R_hat.T (residual activations) instead of live_activations!
-            R_hat_float32 = R_hat.T.to(torch.float32)
-            mask = masking_fn(task_basis, R_hat_float32)
-
-            task_basis_masked = task_basis * mask
-
-            # CRITICAL FIX: Re-normalize each column to unit length before QR!
-            col_norms = torch.norm(task_basis_masked, dim=0, keepdim=True)
-            col_norms[col_norms == 0] = 1.0
-            task_basis_masked = task_basis_masked / col_norms
-
-            new_basis = self._orthogonalize(task_basis_masked)
-        else:
-            new_basis = task_basis
-
-        # 5. Append to Global Memory Vault
+        # 3. Memory Update
         if layer_id not in self.global_bases:
             self.global_bases[layer_id] = new_basis
         else:
-            self.global_bases[layer_id] = torch.cat(
+            combined = torch.cat(
                 [self.global_bases[layer_id], new_basis], dim=1
-            )
+            )  # [cite: 2]
+            Q, _ = torch.linalg.qr(combined)
+            self.global_bases[layer_id] = Q
 
         return k, diagnostics
 
     def project_gradient(self, layer_id, grad):
-        if layer_id not in self.global_bases or self.global_bases[layer_id] is None:
+        """Projects gradients onto the orthogonal complement of the stored subspace."""
+        if layer_id not in self.global_bases:
             return grad
 
-        basis = self.global_bases[layer_id]
+        basis = self.global_bases[layer_id].to(grad.device, dtype=grad.dtype)
 
-        if grad.dim() == 2:  # Weight matrix [out_dim, in_dim]
-            return grad - (grad @ basis) @ basis.T
-        else:  # Bias vector [hidden_dim]
-            return grad - basis @ (basis.T @ grad)
+        if grad.dim() == 4:  # Conv2D: [C_out, C_in, Kh, Kw]
+            c_out, c_in, k_h, k_w = grad.shape
+            grad_mat = grad.view(c_out, c_in * k_h * k_w)
+            grad_proj = grad_mat - (grad_mat @ basis) @ basis.T  # [cite: 2]
+            return grad_proj.view(c_out, c_in, k_h, k_w)
+        elif grad.dim() == 2:  # Linear: [out_features, in_features]
+            return grad - (grad @ basis) @ basis.T  # [cite: 2]
+        return grad - basis @ (basis.T @ grad)
 
     def project_model_gradients(self, model):
         for name, param in model.named_parameters():
@@ -312,12 +123,108 @@ class GPM:
 
     def get_basis_ranks(self):
         return {
-            layer_id: (basis.shape[1] if basis is not None else 0)
-            for layer_id, basis in self.global_bases.items()
+            layer_id: basis.shape[1] for layer_id, basis in self.global_bases.items()
         }
 
     def get_total_basis_rank(self):
         return sum(self.get_basis_ranks().values())
+
+
+class CLMetricsTracker:
+    def __init__(self, max_tasks=20):
+        self.max_tasks = max_tasks
+        # defaultdict-style dynamic storage to avoid rigid pre-allocation
+        self.history = {}
+        self._total_steps_logged = 0
+
+    def _ensure_key_exists(self, key):
+        """Lazy initialization for new dynamic metric keys."""
+        if key not in self.history:
+            # Pad retroactively with None for previous steps if a metric is added late
+            self.history[key] = [None] * self._total_steps_logged
+
+    def log(self, step, acc_list, **extra_metrics):
+        """
+        Logs a single evaluation step.
+
+        Args:
+            step: Global step index.
+            acc_list: List of task accuracies [acc_t0, acc_t1, ...]
+            **extra_metrics: Arbitrary method-specific key-value pairs.
+                             Examples:
+                               basis_rank=[12, 18, 5]
+                               cum_rank=35
+                               effective_rank={"layer1": 4.2, "layer2": 8.1}
+        """
+        self._ensure_key_exists("step")
+        self.history["step"].append(step)
+
+        # 1. Log Task Accuracies
+        for t_idx in range(self.max_tasks):
+            col_key = f"task_{t_idx}_acc"
+            self._ensure_key_exists(col_key)
+            if t_idx < len(acc_list):
+                self.history[col_key].append(float(acc_list[t_idx]))
+            else:
+                self.history[col_key].append(None)
+
+        # 2. Dynamically Log Extra Method-Specific Metrics
+        for metric_name, val in extra_metrics.items():
+            if isinstance(val, (list, tuple)):
+                # Handle sequence inputs (e.g., basis_rank per task or per layer)
+                for idx, sub_val in enumerate(val):
+                    sub_key = f"{metric_name}_{idx}"
+                    self._ensure_key_exists(sub_key)
+                    self.history[sub_key].append(
+                        None if sub_val is None else float(sub_val)
+                    )
+            elif isinstance(val, dict):
+                # Handle dictionary inputs (e.g., {"layer1": 4.5, "layer2": 8.2})
+                for dict_key, sub_val in val.items():
+                    sub_key = f"{metric_name}_{dict_key}"
+                    self._ensure_key_exists(sub_key)
+                    self.history[sub_key].append(
+                        None if sub_val is None else float(sub_val)
+                    )
+            else:
+                # Handle single scalar values
+                self._ensure_key_exists(metric_name)
+                self.history[metric_name].append(None if val is None else float(val))
+
+        # 3. Pad any keys that were created previously but NOT passed in this log call
+        self._total_steps_logged += 1
+        for key in self.history:
+            if len(self.history[key]) < self._total_steps_logged:
+                self.history[key].append(None)
+
+    def save_to_csv(self, filepath="cl_experiment_metrics.csv"):
+        """Exports all recorded columns into a clean, flat CSV file."""
+        directory = os.path.dirname(filepath)
+        if directory and not os.path.exists(directory):
+            os.makedirs(directory)
+
+        # Gather headers dynamically, prioritizing 'step' first
+        headers = ["step"] + [k for k in self.history if k != "step"]
+
+        # Drop columns that are completely empty (all None)
+        active_headers = [
+            h for h in headers if any(val is not None for val in self.history[h])
+        ]
+
+        num_rows = self._total_steps_logged
+
+        with open(filepath, mode="w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(active_headers)
+
+            for r_idx in range(num_rows):
+                row_data = [
+                    "" if self.history[h][r_idx] is None else self.history[h][r_idx]
+                    for h in active_headers
+                ]
+                writer.writerow(row_data)
+
+        print(f"Metrics successfully exported to: '{filepath}'")
 
 
 def rmt_resolvent_masking(task_basis, live_activations, gamma=0.0001, beta=0.01):

@@ -684,3 +684,84 @@ def combine_and_sort_parquets(input_dir, output_path, sort_cols=None):
     combined_df.to_parquet(output_path, index=False)
     print(f"Successfully combined {len(files)} files.")
     print(f"Final shape: {combined_df.shape} -> {output_path}")
+
+
+def save_snapshot(
+    model,
+    gpm,
+    layer_inputs_dict,
+    output_dir,
+    t_idx,
+    epoch=None,
+    alpha=None,
+    g=None,
+    seed=None,
+):
+    """Saves a unified physical checkpoint for post-hoc geometric analysis.
+
+    Stores:
+    - state_dict: Layer weight matrices W^l.
+    - current_basis: Accumulated GPM orthogonal projection bases Q.
+    - svd: Full singular value decomposition (U, S) of representation spaces.
+    """
+    model.eval()
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # 1. Compute full SVD across layer representation matrices
+    svd_data = {}
+    with torch.no_grad():
+        for layer_name, live_input in layer_inputs_dict.items():
+            # Robust key string formatting for int or str keys
+            clean_key = str(layer_name).replace(".", "_")
+
+            if live_input.dim() == 2:
+                R = live_input.T.to(torch.float32)
+            elif live_input.dim() == 4:
+                b, c, h, w = live_input.shape
+                R = (
+                    live_input.permute(1, 0, 2, 3)
+                    .contiguous()
+                    .view(c, -1)
+                    .to(torch.float32)
+                )
+            else:
+                R = live_input.flatten(start_dim=1).T.to(torch.float32)
+
+            # Full singular value decomposition
+            U, S, _ = torch.linalg.svd(R, full_matrices=False)
+
+            svd_data[clean_key] = {
+                "S": S.detach().cpu().to(torch.float32),
+                "U": U.detach().cpu().to(torch.float32),
+            }
+
+    # 2. Export CPU copies of accumulated GPM bases
+    current_basis_cpu = {
+        str(layer_id).replace(".", "_"): basis.detach().cpu().to(torch.float32)
+        for layer_id, basis in gpm.global_bases.items()
+    }
+
+    # 3. Assemble unified payload
+    snapshot = {
+        "metadata": {
+            "task_idx": t_idx,
+            "task_number": t_idx + 1,
+            "epoch": epoch,
+            "alpha": alpha,
+            "g": g,
+            "seed": seed,
+            "total_basis_rank": gpm.get_total_basis_rank(),
+            "layer_ranks": gpm.get_basis_ranks(),
+        },
+        "state_dict": {k: v.detach().cpu() for k, v in model.state_dict().items()},
+        "current_basis": current_basis_cpu,
+        "svd": svd_data,
+    }
+
+    epoch_tag = f"_E{epoch}" if epoch is not None else ""
+    seed_tag = f"_s{seed}" if seed is not None else ""
+    file_path = output_dir / f"snapshot_A{alpha}_T{t_idx + 1:02d}{epoch_tag}{seed_tag}.pt"
+
+    torch.save(snapshot, file_path)
+    return file_path

@@ -1,16 +1,18 @@
-import torch
+from pathlib import Path
+
 import numpy as np
 import pytest
+import torch
 from scipy.stats import levy_stable
 from torch import nn
+
+from src.architectures import GeneralMLP
 from src.utils import (
-    init_heavy_tailed,
     apply_heavy_tailed_init,
+    init_heavy_tailed,
     setup_experiment,
     spectral_filter,
 )
-from src.architectures import GeneralMLP
-from pathlib import Path
 
 
 class ToyModel(nn.Module):

@@ -13,7 +13,6 @@ from scipy.stats import spearmanr
 from torch import nn
 from tqdm import tqdm
 
-from .equations import mcculloch_estimator
 from .rmt import fit_marcenkoPastur
 from .utils import (
     apply_spectral_filter_to_model,
@@ -27,7 +26,9 @@ from .utils import (
 
 
 class ModelTracker:
-    def __init__(self, model, lags=[1, 2, 4, 8, 16, 32, 64, 128]):
+    def __init__(self, model, lags=None):
+        if lags is None:
+            lags = [1, 2, 4, 8, 16, 32, 64, 128]
         self.lags = sorted(lags)
         self.max_lag = max(self.lags)
         self.num_lags = len(self.lags)
@@ -483,7 +484,7 @@ def collect_correlations_from_json(
         with open(tamsd_json_path, "r") as f:
             raw_data = json.load(f)
 
-        layers = sorted([l for l in raw_data.keys() if l != "GLOBAL_MODEL"])
+        layers = sorted([l for l in raw_data if l != "GLOBAL_MODEL"])
         lags = sorted(map(int, raw_data[layers[0]].keys()))
         num_layers = len(layers)
 
@@ -881,7 +882,7 @@ def get_rmt_threshold_percentage(weight_tensor, broadener):
 
     # 2. Fit MP using the authors' official logic
     # We use range_of_y_to_fit=0.7 as per your provided code
-    a_fit, nuMin_fit, nuMax_fit, _ = fit_marcenkoPastur(
+    _a_fit, _nuMin_fit, nuMax_fit, _ = fit_marcenkoPastur(
         nu, broadener, range_of_y_to_fit=0.7
     )
 
@@ -891,3 +892,69 @@ def get_rmt_threshold_percentage(weight_tensor, broadener):
 
     # 4. Return as a percentage of the total rank
     return num_outside_bulk / len(nu)
+
+
+def mcculloch_estimator(W):
+    """
+    Refined McCulloch estimator for a single weight matrix.
+    Operates natively in PyTorch for speed and to avoid alpha > 2.0.
+    """
+    if torch.is_tensor(W):
+        W = W.detach().float().flatten()
+    else:
+        W = torch.from_numpy(W).float().flatten()
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    W = W.to(device)
+
+    # 1. Calculate quantiles
+    q = torch.quantile(W, torch.tensor([0.05, 0.25, 0.75, 0.95], device=device))
+
+    v0_5 = q[3] - q[0]  # 95th - 5th (Full width)
+    v0_25 = q[2] - q[1]  # 75th - 25th (Interquartile range)
+
+    if v0_5 == 0:
+        return 2.0
+
+    # 2. Dispersion Ratio
+    nu = v0_25 / v0_5
+
+    # 3. Reference Table for Symmetric Stable Distributions
+    # These values map (nu) -> alpha for the ratio (q75-q25)/(q95-q05)
+    nu_ref = torch.tensor(
+        [
+            0.042,
+            0.067,
+            0.095,
+            0.126,
+            0.158,
+            0.191,
+            0.225,
+            0.257,
+            0.289,
+            0.317,
+            0.343,
+            0.365,
+            0.383,
+            0.398,
+            0.410,
+        ],
+        device=device,
+    )
+
+    alpha_ref = torch.tensor(
+        [0.6, 0.7, 0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8, 1.9, 2.0],
+        device=device,
+    )
+
+    # 4. Interpolation logic
+    nu = torch.clamp(nu, min=nu_ref[0], max=nu_ref[-1])
+    idx = torch.searchsorted(nu_ref, nu)
+    idx = torch.clamp(idx, 1, len(nu_ref) - 1)
+
+    x0, x1 = nu_ref[idx - 1], nu_ref[idx]
+    y0, y1 = alpha_ref[idx - 1], alpha_ref[idx]
+
+    alpha = y0 + (nu - x0) * (y1 - y0) / (x1 - x0)
+
+    return alpha.item()
