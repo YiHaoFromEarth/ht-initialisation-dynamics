@@ -310,6 +310,55 @@ def apply_heavy_tailed_init(model, alpha, g, seed=0, cutoff_bound=None):
     return model
 
 
+def apply_heavy_tailed_init_class_il(model, alpha, g, seed=0, cutoff_bound=None):
+    """Applies HT init to internal representation layers while leaving
+
+    the final classification readout with standard bounded initialization.
+    """
+    with torch.no_grad():
+        weight_idx = 0
+        for name, module in model.named_modules():
+            # Apply to hidden Conv and Linear layers, skipping classifier
+            if (
+                isinstance(module, (nn.Conv2d, nn.Linear))
+                and "classifier" not in name
+            ):
+                init_heavy_tailed(
+                    module.weight,
+                    alpha=alpha,
+                    g=g,
+                    seed_offset=weight_idx,
+                    seed=seed,
+                    cutoff_bound=cutoff_bound,
+                )
+                weight_idx += 1
+                if module.bias is not None:
+                    module.bias.zero_()
+    return model
+
+
+def apply_heavy_tailed_init_fc_only(model, alpha, g, seed=0, cutoff_bound=None):
+    """Scans a model and applies HT initialization exclusively to fully connected (nn.Linear) layers."""
+    print(f"Applying HT Init (FC layers only): alpha={alpha}, g={g}, seed={seed}")
+    with torch.no_grad():
+        weight_idx = 0
+        for name, module in model.named_modules():
+            if isinstance(module, nn.Linear):
+                init_heavy_tailed(
+                    module.weight,
+                    alpha=alpha,
+                    g=g,
+                    seed_offset=weight_idx,
+                    seed=seed,
+                    cutoff_bound=cutoff_bound,
+                )
+                weight_idx += 1
+                if module.bias is not None:
+                    module.bias.zero_()
+
+    return model
+
+
 def get_layer_from_checkpoint(model_path, layer_key):
     """
     Retrieves a specific weight matrix from a saved checkpoint,
@@ -761,7 +810,9 @@ def save_snapshot(
 
     epoch_tag = f"_E{epoch}" if epoch is not None else ""
     seed_tag = f"_s{seed}" if seed is not None else ""
-    file_path = output_dir / f"snapshot_A{alpha}_T{t_idx + 1:02d}{epoch_tag}{seed_tag}.pt"
+    file_path = (
+        output_dir / f"snapshot_A{alpha}_T{t_idx + 1:02d}{epoch_tag}{seed_tag}.pt"
+    )
 
     torch.save(snapshot, file_path)
     return file_path

@@ -120,30 +120,25 @@ class AlexNetCIFAR(nn.Module):
 
         # Stage 1: Conv1 (3x32x32 -> 64x29x29 -> MaxPool 64x14x14)
         self.conv1 = nn.Conv2d(3, 64, kernel_size=4, stride=1, padding=0, bias=bias)
-        self.bn1 = nn.BatchNorm2d(64)
         self.drop1 = nn.Dropout(0.2) if use_dropout else nn.Identity()
 
         # Stage 2: Conv2 (64x14x14 -> 128x12x12 -> MaxPool 128x6x6)
         self.conv2 = nn.Conv2d(64, 128, kernel_size=3, stride=1, padding=0, bias=bias)
-        self.bn2 = nn.BatchNorm2d(128)
         self.drop2 = nn.Dropout(0.2) if use_dropout else nn.Identity()
 
         # Stage 3: Conv3 (128x6x6 -> 256x5x5 -> MaxPool 256x2x2)
         self.conv3 = nn.Conv2d(128, 256, kernel_size=2, stride=1, padding=0, bias=bias)
-        self.bn3 = nn.BatchNorm2d(256)
         self.drop3 = nn.Dropout(0.5) if use_dropout else nn.Identity()
 
         # Stage 4: FC1 (256*2*2 = 1024 -> 2048)
         self.fc1 = nn.Linear(256 * 2 * 2, 2048, bias=bias)
-        self.bn_fc1 = nn.BatchNorm1d(2048)
         self.drop4 = nn.Dropout(0.5) if use_dropout else nn.Identity()
 
         # Stage 5: FC2 (2048 -> 2048)
         self.fc2 = nn.Linear(2048, 2048, bias=bias)
-        self.bn_fc2 = nn.BatchNorm1d(2048)
         self.drop5 = nn.Dropout(0.5) if use_dropout else nn.Identity()
 
-        # Classification Head (No BatchNorm)
+        # Classification Head
         self.classifier = nn.Linear(2048, num_classes, bias=True)
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
 
@@ -153,14 +148,14 @@ class AlexNetCIFAR(nn.Module):
 
     def get_features(self, x):
         """Extracts penultimate representations (after FC2 post-activations)."""
-        x = self.drop1(self.pool(self.act(self.bn1(self.conv1(x)))))
-        x = self.drop2(self.pool(self.act(self.bn2(self.conv2(x)))))
-        x = self.drop3(self.pool(self.act(self.bn3(self.conv3(x)))))
+        x = self.drop1(self.pool(self.act(self.conv1(x))))
+        x = self.drop2(self.pool(self.act(self.conv2(x))))
+        x = self.drop3(self.pool(self.act(self.conv3(x))))
 
         x = torch.flatten(x, 1)
 
-        x = self.drop4(self.act(self.bn_fc1(self.fc1(x))))
-        x = self.drop5(self.act(self.bn_fc2(self.fc2(x))))
+        x = self.drop4(self.act(self.fc1(x)))
+        x = self.drop5(self.act(self.fc2(x)))
         return x
 
     def get_layer_inputs(self, x):
@@ -169,26 +164,26 @@ class AlexNetCIFAR(nn.Module):
 
         # 1. Conv1 Input [B, 3, 32, 32]
         layer_inputs["conv1"] = x.detach()
-        x = self.drop1(self.pool(self.act(self.bn1(self.conv1(x)))))
+        x = self.drop1(self.pool(self.act(self.conv1(x))))
 
         # 2. Conv2 Input [B, 64, 14, 14]
         layer_inputs["conv2"] = x.detach()
-        x = self.drop2(self.pool(self.act(self.bn2(self.conv2(x)))))
+        x = self.drop2(self.pool(self.act(self.conv2(x))))
 
         # 3. Conv3 Input [B, 128, 6, 6]
         layer_inputs["conv3"] = x.detach()
-        x = self.drop3(self.pool(self.act(self.bn3(self.conv3(x)))))
+        x = self.drop3(self.pool(self.act(self.conv3(x))))
 
         # Flatten spatial feature map (256 * 2 * 2 = 1024)
         x = torch.flatten(x, 1)
 
         # 4. FC1 Input [B, 1024]
         layer_inputs["fc1"] = x.detach()
-        x = self.drop4(self.act(self.bn_fc1(self.fc1(x))))
+        x = self.drop4(self.act(self.fc1(x)))
 
         # 5. FC2 Input [B, 2048]
         layer_inputs["fc2"] = x.detach()
-        x = self.drop5(self.act(self.bn_fc2(self.fc2(x))))
+        x = self.drop5(self.act(self.fc2(x)))
 
         # 6. Classifier Input [B, 2048]
         layer_inputs["classifier"] = x.detach()
@@ -201,25 +196,25 @@ class AlexNetCIFAR(nn.Module):
 
         h1 = self.conv1(x)
         pre_activations["conv1"] = h1.detach()
-        x = self.drop1(self.pool(self.act(self.bn1(h1))))
+        x = self.drop1(self.pool(self.act(h1)))
 
         h2 = self.conv2(x)
         pre_activations["conv2"] = h2.detach()
-        x = self.drop2(self.pool(self.act(self.bn2(h2))))
+        x = self.drop2(self.pool(self.act(h2)))
 
         h3 = self.conv3(x)
         pre_activations["conv3"] = h3.detach()
-        x = self.drop3(self.pool(self.act(self.bn3(h3))))
+        x = self.drop3(self.pool(self.act(h3)))
 
         x = torch.flatten(x, 1)
 
         h_fc1 = self.fc1(x)
         pre_activations["fc1"] = h_fc1.detach()
-        x = self.drop4(self.act(self.bn_fc1(h_fc1)))
+        x = self.drop4(self.act(h_fc1))
 
         h_fc2 = self.fc2(x)
         pre_activations["fc2"] = h_fc2.detach()
-        x = self.drop5(self.act(self.bn_fc2(h_fc2)))
+        x = self.drop5(self.act(h_fc2))
 
         pre_activations["classifier"] = self.classifier(x).detach()
 
